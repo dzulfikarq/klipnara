@@ -57,6 +57,7 @@ Open PowerShell at repository root:
 
 ```powershell
 cd backend
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
@@ -67,10 +68,10 @@ $env:OLLAMA_MODEL = "qwen2.5:1.5b"
 # Optional if package aliases are not on PATH
 $env:FFMPEG_PATH = "$env:LOCALAPPDATA\Microsoft\WinGet\Links\ffmpeg.exe"
 $env:FFPROBE_PATH = "$env:LOCALAPPDATA\Microsoft\WinGet\Links\ffprobe.exe"
-uvicorn clipper.main:app --host 127.0.0.1 --port 8000
+uvicorn clipper.main:app --host 127.0.0.1 --port 8000 --env-file .env
 ```
 
-`.env.example` is a reference only. Uvicorn reads `.env` only when invoked with `--env-file .env`; keep cloud keys in process/OS environment, not `.env`.
+Uvicorn loads `.env` only because command uses `--env-file`; process environment overrides sample values. Keep cloud keys in process/OS environment, not `.env`.
 
 Worker runs in backend process; persistent SQLite database and media live under `%LOCALAPPDATA%\Klipnara` by default. Set `CLIPPER_DATA_DIR` to change location. Backend defaults bind to loopback; do not expose it to LAN without adding authentication.
 

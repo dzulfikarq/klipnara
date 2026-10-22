@@ -11,7 +11,7 @@ Requirements: Windows 10/11, Python 3.10+, Node.js 20.9+, FFmpeg/ffprobe, whispe
 
 ### 1. Install media runtimes
 
-- Install a full FFmpeg build with `ffprobe`, `libx264`, and `libass`: `winget install --id Gyan.FFmpeg --exact`. Verified Gyan full build uses GPL-3.0 components; review build licensing before redistribution.
+- Install a full FFmpeg build with `ffprobe`, `libx264`, and `libass`: `winget install --id Gyan.FFmpeg --exact`. Verified Gyan full build uses GPL-3.0 components; review build licensing before redistribution. WinGet installs command aliases under `%LOCALAPPDATA%\Microsoft\WinGet\Links`; open a new terminal or add that directory to PATH.
 - Install [CMake](https://cmake.org/) and Visual Studio C++ Build Tools, then build whisper.cpp CPU-only. Verified with CMake 4.4.4 and VS Build Tools 17.14.42:
 
 ```powershell
@@ -27,7 +27,7 @@ cmake --build build --config Release --parallel 4
 .\models\download-ggml-model.cmd small .\models
 ```
 
-- Install Ollama: `winget install --id Ollama.Ollama --exact`, start Ollama Desktop, then `ollama pull qwen2.5:1.5b`. Ollama is optional for ingest/render; local highlight analysis needs service and model. If Desktop is not running, `ollama serve` starts the local API in a separate terminal.
+- Install Ollama: `winget install --id Ollama.Ollama --exact`, start Ollama Desktop, then `ollama pull qwen2.5:1.5b`. If `ollama` is not on PATH, add `$env:LOCALAPPDATA\Programs\Ollama`. Ollama is optional for ingest/render; local highlight analysis needs service and model. If Desktop is not running, `ollama serve` starts the local API in a separate terminal.
 
 Bounded service/model check (max three 1-second attempts; no Cloud fallback):
 
@@ -62,6 +62,8 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 $env:WHISPER_CPP_PATH = "C:\tools\whisper.cpp\build\bin\Release\whisper-cli.exe"
 $env:WHISPER_MODEL_PATH = "C:\tools\whisper.cpp\models\ggml-base.bin"
+$env:OLLAMA_URL = "http://127.0.0.1:11434"
+$env:OLLAMA_MODEL = "qwen2.5:1.5b"
 # Optional if package aliases are not on PATH
 $env:FFMPEG_PATH = "$env:LOCALAPPDATA\Microsoft\WinGet\Links\ffmpeg.exe"
 $env:FFPROBE_PATH = "$env:LOCALAPPDATA\Microsoft\WinGet\Links\ffprobe.exe"

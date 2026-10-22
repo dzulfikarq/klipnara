@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from .config import CLIP_DIR, DATA_DIR, MAX_UPLOAD_BYTES, MIN_FREE_BYTES, SOURCE_DIR
+from .config import CLIP_DIR, DATA_DIR, LEGACY_CLIP_DIR, LEGACY_SOURCE_DIR, MAX_UPLOAD_BYTES, MIN_FREE_BYTES, SOURCE_DIR, WORK_DIR
 from .db import connect, init_db, unpack
 from .jobs import create_job, now, runner
 from .media import MediaError, download_url, probe, save_upload
@@ -79,21 +79,21 @@ def startup():
     runner.start()
 
 
-def _require_storage(bytes_needed=0):
-    if shutil.disk_usage(DATA_DIR if DATA_DIR.exists() else DATA_DIR.parent).free < bytes_needed + MIN_FREE_BYTES:
+def _require_storage(directory=DATA_DIR):
+    if min(shutil.disk_usage(path).free for path in {DATA_DIR, WORK_DIR, directory}) < MIN_FREE_BYTES:
         raise HTTPException(507, "Low disk space. Keep at least 1 GiB free for temporary processing files.")
 
 
 def _source_path(source):
     path = Path(source["path"]).resolve()
-    if path.parent != SOURCE_DIR.resolve() or not path.is_file():
+    if path.parent not in {SOURCE_DIR.resolve(), LEGACY_SOURCE_DIR.resolve()} or not path.is_file():
         raise HTTPException(404, "Source file not found.")
     return path
 
 
 def _safe_clip_path(path):
     resolved = Path(path).resolve()
-    if CLIP_DIR.resolve() not in resolved.parents or not resolved.is_file():
+    if resolved.parent not in {CLIP_DIR.resolve(), LEGACY_CLIP_DIR.resolve()} or not resolved.is_file():
         raise HTTPException(404, "Rendered clip not found.")
     return resolved
 
@@ -127,7 +127,7 @@ def health():
 
 @app.post("/api/sources/upload")
 def upload_source(file: UploadFile = File(...)):
-    _require_storage()
+    _require_storage(SOURCE_DIR)
     safe_name = Path((file.filename or "video.mp4").replace("\\", "/")).name
     suffix = Path(safe_name).suffix.lower()
     try:
@@ -138,7 +138,7 @@ def upload_source(file: UploadFile = File(...)):
         path.unlink(missing_ok=True)
         raise HTTPException(413, "Video exceeds configured upload limit.")
     try:
-        _require_storage(size)
+        _require_storage(SOURCE_DIR)
         metadata = _insert_source(source_id, safe_name or "Video", path, size, digest)
     except Exception:
         path.unlink(missing_ok=True)
@@ -148,7 +148,7 @@ def upload_source(file: UploadFile = File(...)):
 
 @app.post("/api/sources/url")
 def import_url(body: UrlSource):
-    _require_storage()
+    _require_storage(SOURCE_DIR)
     try:
         path, source_id, size, digest = download_url(body.url)
     except MediaError as exc:
@@ -157,7 +157,7 @@ def import_url(body: UrlSource):
     file_name = Path(urllib.parse.unquote(parsed.path)).name
     name = file_name if file_name.lower().endswith((".mp4", ".mov")) else f"Video dari {parsed.hostname}"
     try:
-        _require_storage(size)
+        _require_storage(SOURCE_DIR)
         metadata = _insert_source(source_id, name, path, size, digest)
     except Exception:
         path.unlink(missing_ok=True)
@@ -216,7 +216,7 @@ def delete_source(source_id: str):
         if row is None:
             raise HTTPException(404, "Video source not found.")
         source_path = Path(row["path"]).resolve()
-        if source_path.parent != SOURCE_DIR.resolve():
+        if source_path.parent not in {SOURCE_DIR.resolve(), LEGACY_SOURCE_DIR.resolve()}:
             raise HTTPException(500, "Source path is outside the managed storage folder.")
         conn.execute("DELETE FROM sources WHERE id=?", (source_id,))
     source_path.unlink(missing_ok=True)
@@ -321,6 +321,7 @@ def edit_clip(clip_id: str, body: ClipEdit):
 
 @app.post("/api/clips/{clip_id}/render")
 def render_clip(clip_id: str):
+    _require_storage(CLIP_DIR)
     with connect() as conn:
         clip = conn.execute("SELECT * FROM clips WHERE id=?", (clip_id,)).fetchone()
         if clip is None:
@@ -435,7 +436,9 @@ def settings():
             "gemini": {"model": os.environ.get("GEMINI_MODEL", "gemini-2.0-flash"), "key_configured": bool(os.environ.get("GEMINI_API_KEY"))},
         },
         "data_dir": str(DATA_DIR),
-        "free_bytes": shutil.disk_usage(DATA_DIR).free,
+        "source_dir": str(SOURCE_DIR),
+        "clip_dir": str(CLIP_DIR),
+        "free_bytes": min(shutil.disk_usage(path).free for path in {DATA_DIR, WORK_DIR, SOURCE_DIR, CLIP_DIR}),
     }
 
 
@@ -520,7 +523,7 @@ def _capabilities():
             vulkan_available = "deviceName" in output
     except (OSError, subprocess.SubprocessError):
         pass
-    free = shutil.disk_usage(DATA_DIR if DATA_DIR.exists() else DATA_DIR.parent).free
+    free = min(shutil.disk_usage(path).free for path in {DATA_DIR, WORK_DIR, SOURCE_DIR, CLIP_DIR})
     return {
         "os": os_name,
         "cpu": cpu,

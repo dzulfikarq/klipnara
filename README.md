@@ -65,6 +65,8 @@ $env:WHISPER_CPP_PATH = "C:\tools\whisper.cpp\build\bin\Release\whisper-cli.exe"
 $env:WHISPER_MODEL_PATH = "C:\tools\whisper.cpp\models\ggml-base.bin"
 $env:OLLAMA_URL = "http://127.0.0.1:11434"
 $env:OLLAMA_MODEL = "qwen2.5:1.5b"
+$env:CLIPPER_SOURCE_DIR = "G:\Klipnara\sources"
+$env:CLIPPER_CLIP_DIR = "G:\Klipnara\clips"
 # Optional if package aliases are not on PATH
 $env:FFMPEG_PATH = "$env:LOCALAPPDATA\Microsoft\WinGet\Links\ffmpeg.exe"
 $env:FFPROBE_PATH = "$env:LOCALAPPDATA\Microsoft\WinGet\Links\ffprobe.exe"
@@ -73,7 +75,7 @@ uvicorn clipper.main:app --host 127.0.0.1 --port 8000 --env-file .env
 
 Uvicorn loads `.env` only because command uses `--env-file`; process environment overrides sample values. Keep cloud keys in process/OS environment, not `.env`.
 
-Worker runs in backend process; persistent SQLite database and media live under `%LOCALAPPDATA%\Klipnara` by default. Set `CLIPPER_DATA_DIR` to change location. Backend defaults bind to loopback; do not expose it to LAN without adding authentication.
+Worker runs in backend process. SQLite and temporary files stay under `%LOCALAPPDATA%\Klipnara` by default; `CLIPPER_SOURCE_DIR` and `CLIPPER_CLIP_DIR` set original-video and rendered-output roots independently. This setup uses `G:\Klipnara\sources` and `G:\Klipnara\clips`. `CLIPPER_DATA_DIR` changes database/temp root. Existing media paths remain readable from the previous managed folders. Backend defaults bind to loopback; do not expose it to LAN without adding authentication.
 
 Optional cloud keys must be set in backend process environment, never in UI, SQLite, or logs:
 
@@ -185,6 +187,8 @@ Five candidates returned in both successful runs. App-pipeline base WER was 41.7
 720p renders (19.5 sec clip) took 3.3–4.1 sec; 1080p took 9.0 sec. H.264/AAC, 9:16 dimensions, complete FFmpeg decode, zero detected black frames, A/V start offset below 100 ms. Clean/Bold/Highlight frames were visually checked; Highlight is phrase-level, yellow. Manual crop x/y values exercised. Rerender preserved exact transcript. Live render cancel stopped FFmpeg, kept previous render, and retry completed. Missing ffprobe/FFmpeg/whisper and missing Ollama model returned explicit local errors. Cloud keys were unset; provider usage rows were local only.
 
 One test attempt found Ollama Desktop/service stopped while idle: local request failed immediately; no Cloud fallback. Starting Ollama restored `/api/tags` in 134 ms. Backend now checks service/model with at most three 1-second attempts and distinguishes stopped service, missing model, and inference timeout with explicit `ollama serve` / `ollama pull` guidance. Active FFmpeg render cancellation stopped the encoder; previous MP4 remained until retry succeeded. Ollama returned and Klipnara persisted 792 input / 1,271 output tokens for cached-transcript reanalysis; no cost estimate was generated. Tracked workload RSS reached 2.20 GiB (Python, Whisper, FFmpeg and Ollama runner); system RAM was 15.9 GiB. After unloading Qwen, available RAM measured 4.8 GiB in this agent environment; stop/unload the model after heavy tests when RAM is tight. In final test run, MP4s and screenshot frames are under `%LOCALAPPDATA%\Temp\opencode\klipnara-tests\run-06\`; no media fixture is committed.
+
+Storage-path smoke passed on G: (119.7 GiB free at check): new upload landed under `G:\Klipnara\sources`; H.264/AAC render landed under `G:\Klipnara\clips`; API delete removed both test files. Existing source row/file in `%LOCALAPPDATA%\Klipnara\sources` was left in place and remains readable through legacy-path handling.
 
 Not run: 10-minute varied-content source, full browser E2E, offline-isolated test, OpenAI/Gemini live calls, human review of every subtitle, 1080p beyond the selected clip. The 5-minute source looped 2.5-minute speech twice, so long-content variety remains unverified.
 

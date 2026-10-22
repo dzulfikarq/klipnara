@@ -12,6 +12,22 @@ class ProviderError(RuntimeError):
     pass
 
 
+def _gemini_schema(schema):
+    result = {}
+    for key, value in schema.items():
+        if key == "additionalProperties":
+            continue
+        if key == "type" and isinstance(value, str):
+            result[key] = value.upper()
+        elif key == "properties":
+            result[key] = {name: _gemini_schema(item) for name, item in value.items()}
+        elif key == "items":
+            result[key] = _gemini_schema(value)
+        else:
+            result[key] = value
+    return result
+
+
 def check_local():
     base = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
     if urllib.parse.urlparse(base).hostname not in {"127.0.0.1", "localhost", "::1"}:
@@ -46,6 +62,15 @@ def _post(url, payload, headers=None, timeout=180):
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read())
     except urllib.error.HTTPError as exc:
+        if exc.code == 429 and "generativelanguage.googleapis.com" in url:
+            raise ProviderError(
+                "Gemini Free Tier quota/rate limit exceeded (HTTP 429). Wait for quota reset or review AI Studio limits. "
+                "Klipnara will not upgrade billing, retry automatically, or switch providers."
+            ) from None
+        if exc.code == 403 and "generativelanguage.googleapis.com" in url:
+            raise ProviderError(
+                "Gemini denied this request (HTTP 403). Check Free Tier key/model access; no paid or provider fallback was attempted."
+            ) from None
         raise ProviderError(f"AI provider rejected request (HTTP {exc.code}).") from None
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
         raise ProviderError(f"AI provider unavailable: {type(exc).__name__}.") from None
@@ -108,14 +133,15 @@ def analyze(provider, prompt):
         key = os.environ.get("GEMINI_API_KEY")
         if not key:
             raise ProviderError("GEMINI_API_KEY is not configured on the backend.")
-        model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={urllib.parse.quote(key)}"
+        model = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(model, safe='-')}:generateContent"
         response = _post(
             url,
             {
                 "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"responseMimeType": "application/json", "responseSchema": SCHEMA},
+                "generationConfig": {"responseMimeType": "application/json", "responseSchema": _gemini_schema(SCHEMA)},
             },
+            headers={"x-goog-api-key": key},
             timeout=180,
         )
         try:

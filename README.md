@@ -83,10 +83,11 @@ Optional cloud keys must be set in backend process environment, never in UI, SQL
 $env:OPENAI_API_KEY = "..."
 $env:GEMINI_API_KEY = "..."
 $env:OPENAI_MODEL = "gpt-4o-mini"
-$env:GEMINI_MODEL = "gemini-2.0-flash"
+$env:GEMINI_MODEL = "gemini-3.5-flash-lite"
+# Alternative model: $env:GEMINI_MODEL = "gemini-3.6-flash"
 ```
 
-Keys are read only by backend. Cloud generation and every cloud retry require explicit consent. Cloud receives transcript text/timestamps and limited job metadata, never video/audio. No automatic provider fallback. OpenAI/Gemini price and live connectivity depend on user's account; app does not invent cost estimates. Local API docs: `http://127.0.0.1:8000/api/docs`.
+Keys are read only by backend and sent in `x-goog-api-key`, not URL/SQLite/logs. Use Gemini API key from Free Tier project with billing disabled; tier belongs to the Google project. Cloud generation and every cloud retry require explicit consent. Gemini sends transcript text/timestamps and limited metadata, never video/audio. HTTP 429 stops job with quota guidance; no automatic paid upgrade or provider fallback. Configure alternative with `GEMINI_MODEL=gemini-3.6-flash`. Local API docs: `http://127.0.0.1:8000/api/docs`.
 
 ### 3. Run frontend
 
@@ -151,6 +152,8 @@ Run Python checks after `pip install -r requirements-dev.txt` from `backend`:
 .venv\Scripts\python.exe tests\test_core.py
 .venv\Scripts\python.exe tests\test_api.py
 .venv\Scripts\python.exe -m compileall -q clipper tests
+# One live call with a confirmed Free Tier key; synthetic transcript only.
+.venv\Scripts\python.exe tests\test_gemini_live.py
 ```
 
 Run frontend checks from `frontend`:
@@ -184,13 +187,15 @@ Measured on i3-9100F / 15.9 GiB RAM / RX 570:
 
 Five candidates returned in both successful runs. App-pipeline base WER was 41.7% on this selected 242-word FLEURS sample; direct base CLI WER 35.5%. Optional `small` direct CLI improved this sample to 19.0% WER, but took 74.3 sec versus 40.9 sec for base; small not run through full app pipeline. Transcripts need user review; WER is sample-specific, not a general accuracy claim.
 
-720p renders (19.5 sec clip) took 3.3–4.1 sec; 1080p took 9.0 sec. H.264/AAC, 9:16 dimensions, complete FFmpeg decode, zero detected black frames, A/V start offset below 100 ms. Clean/Bold/Highlight frames were visually checked; Highlight is phrase-level, yellow. Manual crop x/y values exercised. Rerender preserved exact transcript. Live render cancel stopped FFmpeg, kept previous render, and retry completed. Missing ffprobe/FFmpeg/whisper and missing Ollama model returned explicit local errors. Cloud keys were unset; provider usage rows were local only.
+720p renders (19.5 sec clip) took 3.3–4.1 sec; 1080p took 9.0 sec. H.264/AAC, 9:16 dimensions, complete FFmpeg decode, zero detected black frames, A/V start offset below 100 ms. Clean/Bold/Highlight frames were visually checked; Highlight is phrase-level, yellow. Manual crop x/y values exercised. Rerender preserved exact transcript. Live render cancel stopped FFmpeg, kept previous render, and retry completed. Missing ffprobe/FFmpeg/whisper and missing Ollama model returned explicit local errors. Real-media run had no Cloud key and used Local AI only; provider usage rows were local only.
 
 One test attempt found Ollama Desktop/service stopped while idle: local request failed immediately; no Cloud fallback. Starting Ollama restored `/api/tags` in 134 ms. Backend now checks service/model with at most three 1-second attempts and distinguishes stopped service, missing model, and inference timeout with explicit `ollama serve` / `ollama pull` guidance. Active FFmpeg render cancellation stopped the encoder; previous MP4 remained until retry succeeded. Ollama returned and Klipnara persisted 792 input / 1,271 output tokens for cached-transcript reanalysis; no cost estimate was generated. Tracked workload RSS reached 2.20 GiB (Python, Whisper, FFmpeg and Ollama runner); system RAM was 15.9 GiB. After unloading Qwen, available RAM measured 4.8 GiB in this agent environment; stop/unload the model after heavy tests when RAM is tight. In final test run, MP4s and screenshot frames are under `%LOCALAPPDATA%\Temp\opencode\klipnara-tests\run-06\`; no media fixture is committed.
 
 Storage-path smoke passed on G: (119.7 GiB free at check): new upload landed under `G:\Klipnara\sources`; H.264/AAC render landed under `G:\Klipnara\clips`; API delete removed both test files. Existing source row/file in `%LOCALAPPDATA%\Klipnara\sources` was left in place and remains readable through legacy-path handling.
 
-Not run: 10-minute varied-content source, full browser E2E, offline-isolated test, OpenAI/Gemini live calls, human review of every subtitle, 1080p beyond the selected clip. The 5-minute source looped 2.5-minute speech twice, so long-content variety remains unverified.
+Gemini model catalog, using the configured Free Tier key, confirmed both requested model IDs support `generateContent`. One live `gemini-3.5-flash-lite` structured-output request used synthetic timestamped text only (no video/audio), returned two valid candidates, 206 input / 160 output tokens in 1.18 sec. `gemini-3.6-flash` generation was not called. Structured schema conversion, consent rejection, and simulated HTTP 429 quota messaging pass tests; no automatic retry/fallback.
+
+Not run: 10-minute varied-content source, full browser E2E, offline-isolated test, OpenAI live call, Gemini 3.6 live call, actual Gemini 429 response, human review of every subtitle, 1080p beyond the selected clip. The 5-minute source looped 2.5-minute speech twice, so long-content variety remains unverified.
 
 ## Known limits
 

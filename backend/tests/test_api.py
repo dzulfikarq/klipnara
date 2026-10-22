@@ -6,6 +6,7 @@ from pathlib import Path
 
 os.environ["CLIPPER_DATA_DIR"] = tempfile.mkdtemp(prefix="clipper-test-")
 os.environ["OPENAI_API_KEY"] = "test-only-key"
+os.environ["GEMINI_API_KEY"] = "test-only-key"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient
@@ -18,6 +19,7 @@ from clipper.main import app
 def run():
     with TestClient(app) as client:
         assert client.get("/api/health").json() == {"status": "ok"}
+        assert client.get("/api/settings").json()["providers"]["gemini"]["model"] == "gemini-3.5-flash-lite"
         capabilities = client.get("/api/system/capabilities").json()
         assert capabilities["cpu"] and capabilities["ram_bytes"] and capabilities["gpus"]
         assert client.post("/api/sources/url", json={"url": "http://127.0.0.1/video.mp4"}).status_code == 400
@@ -33,6 +35,7 @@ def run():
         endpoint = f"/api/sources/{source_id}/generate"
         cloud = {"provider": "openai", "consent": False}
         assert client.post(endpoint, json=cloud).status_code == 400
+        assert client.post(endpoint, json={"provider": "gemini", "consent": False}).status_code == 400
         cloud["consent"] = True
         result = client.post(endpoint, json=cloud)
         assert result.status_code == 200

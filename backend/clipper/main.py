@@ -433,7 +433,7 @@ def settings():
         "providers": {
             "local": {"model": os.environ.get("OLLAMA_MODEL", "qwen2.5:1.5b"), "available": capabilities["ollama_connected"]},
             "openai": {"model": os.environ.get("OPENAI_MODEL", "gpt-4o-mini"), "key_configured": bool(os.environ.get("OPENAI_API_KEY"))},
-            "gemini": {"model": os.environ.get("GEMINI_MODEL", "gemini-2.0-flash"), "key_configured": bool(os.environ.get("GEMINI_API_KEY"))},
+            "gemini": {"model": os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite"), "key_configured": bool(os.environ.get("GEMINI_API_KEY"))},
         },
         "data_dir": str(DATA_DIR),
         "source_dir": str(SOURCE_DIR),

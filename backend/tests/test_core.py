@@ -2,15 +2,16 @@ import json
 import os
 import sys
 import tempfile
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from clipper.analysis import parse_and_validate, transcript_chunks
 from clipper.media import MediaError, _public_addresses, _write_ass
-from clipper.providers import ProviderError, check_local
+from clipper.providers import ProviderError, _post, analyze, check_local
 
 
 def run():
@@ -82,6 +83,37 @@ def run():
             else:
                 raise AssertionError("unavailable Ollama was accepted")
             assert request.call_count == 3
+
+    model_response = {
+        "candidates": [{"content": {"parts": [{"text": json.dumps({"clips": [{"start": 0, "end": 20, "title": "Hook", "reason": "Useful insight"}]})}]}}],
+        "usageMetadata": {"promptTokenCount": 73, "candidatesTokenCount": 18},
+    }
+    with patch.dict(os.environ, {"GEMINI_API_KEY": "test-only-key", "GEMINI_MODEL": "gemini-3.5-flash-lite"}):
+        with patch("clipper.providers._post", return_value=model_response) as send:
+            raw, model, usage = analyze("gemini", "[0-20] Synthetic transcript for schema check")
+        url, payload = send.call_args.args[:2]
+        assert model == "gemini-3.5-flash-lite" and url.endswith("gemini-3.5-flash-lite:generateContent")
+        assert send.call_args.kwargs["headers"] == {"x-goog-api-key": "test-only-key"}
+        schema = payload["generationConfig"]["responseSchema"]
+        assert schema["type"] == "OBJECT" and schema["properties"]["clips"]["type"] == "ARRAY"
+        assert "additionalProperties" not in schema
+        assert "video" not in payload and usage == {"promptTokenCount": 73, "candidatesTokenCount": 18}
+        valid = parse_and_validate(raw, duration=30, minimum=15, maximum=30, limit=3)
+        assert valid[0]["title"] == "Hook"
+
+    with patch.dict(os.environ, {"GEMINI_API_KEY": "test-only-key", "GEMINI_MODEL": "gemini-3.6-flash"}):
+        with patch("clipper.providers._post", return_value=model_response) as send:
+            _, model, _ = analyze("gemini", "synthetic transcript")
+        assert model == "gemini-3.6-flash" and "gemini-3.6-flash:generateContent" in send.call_args.args[0]
+
+    gemini_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent"
+    with patch("clipper.providers.urllib.request.urlopen", side_effect=HTTPError(gemini_url, 429, "RESOURCE_EXHAUSTED", {}, BytesIO())):
+        try:
+            _post(gemini_url, {})
+        except ProviderError as exc:
+            assert "Free Tier quota" in str(exc) and "will not upgrade billing" in str(exc)
+        else:
+            raise AssertionError("Gemini HTTP 429 did not produce quota-specific error")
     print("core validation checks passed")
 
 

@@ -130,12 +130,18 @@ def main():
             }
             saved = client.patch(f"/api/clips/{clip['id']}", json=edit)
             assert saved.status_code == 200, saved.text
+            with connect() as conn:
+                review_state = conn.execute("SELECT review_status FROM clips WHERE id=?", (clip["id"],)).fetchone()["review_status"]
+            assert review_state == "needs_review", review_state
             job_id = client.post(f"/api/clips/{clip['id']}/render").json()["id"]
             job = wait_job(client, job_id, args.timeout)
             assert job["status"] == "completed", job
 
             with connect() as conn:
-                row = conn.execute("SELECT rendered_path,edit_json FROM clips WHERE id=?", (clip["id"],)).fetchone()
+                row = conn.execute("SELECT rendered_path,edit_json,review_status FROM clips WHERE id=?", (clip["id"],)).fetchone()
+            assert row["review_status"] == "needs_review", row["review_status"]
+            approved = client.post(f"/api/clips/{clip['id']}/review", json={"status": "approved"})
+            assert approved.status_code == 200 and approved.json()["review_status"] == "approved", approved.text
             original_output = Path(row["rendered_path"])
             label = f"{style.lower()}-{resolution}p-{index + 1}"
             output = args.output_dir / f"{label}.mp4"
@@ -144,8 +150,11 @@ def main():
             ass_path = args.output_dir / f"{label}.ass"
             _write_ass(ass_path, transcript, clip["start"] + edit["trim_start"], clip["start"] + edit["trim_end"], style_edit, int(resolution) * 1280 // 720)
             assert any(line.startswith("Dialogue:") for line in ass_path.read_text(encoding="utf-8-sig").splitlines())
-            media = inspect_render(output, ffmpeg, ffprobe, args.output_dir / f"{label}-frame.jpg")
-            results["renders"].append({"style": style, "resolution": resolution, "crop_x": crop_x, "crop_y": crop_y, "path": str(output), "seconds": job["_elapsed_seconds"], **media})
+            media = inspect_render(
+                output, ffmpeg, ffprobe, args.output_dir / f"{label}-frame.jpg",
+                expected_duration=edit["trim_end"] - edit["trim_start"],
+            )
+            results["renders"].append({"style": style, "resolution": resolution, "crop_x": crop_x, "crop_y": crop_y, "path": str(output), "seconds": job["_elapsed_seconds"], "review_status": approved.json()["review_status"], **media})
             save_report()
             assert json.dumps(client.get(f"/api/sources/{source['id']}").json()["source"]["transcript"], ensure_ascii=False, sort_keys=True) == transcript_before
 
@@ -171,14 +180,17 @@ def main():
             cancelled = wait_job(client, cancel_job, args.timeout)
             assert cancelled["status"] == "cancelled", cancelled
             with connect() as conn:
-                clip_state = conn.execute("SELECT status,rendered_path FROM clips WHERE id=?", (clip["id"],)).fetchone()
-            assert clip_state["status"] == "needs_render" and clip_state["rendered_path"]
+                clip_state = conn.execute("SELECT status,rendered_path,review_status FROM clips WHERE id=?", (clip["id"],)).fetchone()
+            assert clip_state["status"] == "needs_render" and clip_state["rendered_path"] and clip_state["review_status"] == "needs_review"
             prior_asset_preserved = Path(clip_state["rendered_path"]).is_file()
             assert prior_asset_preserved
             retried = client.post(f"/api/jobs/{cancel_job}/retry", json={})
             assert retried.status_code == 200, retried.text
             cancel_retry = wait_job(client, retried.json()["id"], args.timeout)
             assert cancel_retry["status"] == "completed", cancel_retry
+            with connect() as conn:
+                review_state = conn.execute("SELECT review_status FROM clips WHERE id=?", (clip["id"],)).fetchone()["review_status"]
+            assert review_state == "needs_review", review_state
             results["cancel_retry"] = {"cancelled_job": cancelled, "retry_job": cancel_retry, "prior_asset_preserved_after_cancel": prior_asset_preserved}
         else:
             raise AssertionError("Could not cancel an active render before it completed.")
@@ -269,21 +281,34 @@ def ollama_process_list():
         return "ollama ps unavailable"
 
 
-def inspect_render(path, ffmpeg, ffprobe, frame_path):
+def inspect_render(path, ffmpeg, ffprobe, frame_path, expected_duration=None):
     probe = subprocess.run([ffprobe, "-v", "error", "-show_format", "-show_streams", "-of", "json", str(path)], capture_output=True, text=True, check=True)
     info = json.loads(probe.stdout)
     streams = {stream["codec_type"]: stream for stream in info["streams"]}
     video, audio = streams["video"], streams["audio"]
     duration = float(info["format"]["duration"])
+    video_duration = float(video.get("duration", duration))
+    audio_duration = float(audio.get("duration", duration))
     assert video["codec_name"] == "h264" and audio["codec_name"] == "aac"
     assert (video["width"], video["height"]) in {(720, 1280), (1080, 1920)}
     assert abs(float(video.get("start_time", 0)) - float(audio.get("start_time", 0))) < 0.1
+    assert abs(video_duration - audio_duration) < 0.1
+    if expected_duration is not None:
+        assert abs(video_duration - expected_duration) < 0.15
     assert subprocess.run([ffmpeg, "-v", "error", "-i", str(path), "-f", "null", "NUL"], capture_output=True).returncode == 0
     black = subprocess.run([ffmpeg, "-hide_banner", "-i", str(path), "-vf", "blackdetect=d=0.05:pix_th=0.10:pic_th=0.99", "-an", "-f", "null", "NUL"], capture_output=True, text=True)
     assert black.returncode == 0 and "black_start" not in black.stderr
     frame = subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-ss", f"{min(3, duration / 3):.2f}", "-i", str(path), "-frames:v", "1", "-y", str(frame_path)], capture_output=True)
     assert frame.returncode == 0 and frame_path.is_file()
-    return {"duration": round(duration, 2), "bytes": path.stat().st_size, "video": f"{video['width']}x{video['height']} {video['codec_name']}", "audio": f"{audio['codec_name']} {audio.get('sample_rate')}Hz", "black_frames": 0, "decode": "ok", "frame": str(frame_path)}
+    return {
+        "duration": round(duration, 2), "video_duration": round(video_duration, 3),
+        "audio_duration": round(audio_duration, 3),
+        "av_duration_delta": round(abs(video_duration - audio_duration), 3),
+        "bytes": path.stat().st_size,
+        "video": f"{video['width']}x{video['height']} {video['codec_name']}",
+        "audio": f"{audio['codec_name']} {audio.get('sample_rate')}Hz",
+        "black_frames": 0, "decode": "ok", "frame": str(frame_path),
+    }
 
 
 if __name__ == "__main__":

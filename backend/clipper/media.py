@@ -192,9 +192,8 @@ def transcribe(path, language, cancel):
     work_id = uuid.uuid4().hex
     output_base = WORK_DIR / f"transcript-{work_id}"
     command = [binary, "-m", model, "-f", str(path), "-oj", "-of", str(output_base)]
-    selected_language = {"indonesia": "id", "english": "en"}.get(language)
-    if selected_language:
-        command.extend(["-l", selected_language])
+    selected_language = {"auto": "auto", "indonesia": "id", "english": "en"}.get(language)
+    command.extend(["-l", selected_language or "auto"])
     output_json = Path(f"{output_base}.json")
     try:
         _run(command, cancel)
@@ -219,12 +218,46 @@ def transcribe(path, language, cancel):
     return segments, detected, model_id
 
 
+def transcript_cache_matches(source, language):
+    if not source.get("transcript_json") or source.get("transcript_config") != transcription_config_key(language):
+        return False
+    cached = source.get("transcript_model") or ""
+    parts = cached.split("|")
+    if len(parts) < 2:
+        return True
+    configured_model = os.environ.get("WHISPER_MODEL_PATH")
+    if not configured_model or Path(configured_model).resolve() != Path(parts[1]).resolve():
+        return not configured_model and source.get("transcript_config") == transcription_config_key(language)
+    binary = os.environ.get("WHISPER_CPP_PATH", "whisper-cli")
+    binary = shutil.which(binary) or (str(Path(binary).resolve()) if Path(binary).is_file() else None)
+    if not binary or Path(binary).resolve() != Path(parts[0]).resolve() or len(parts) < 6:
+        return True
+    try:
+        return cached == _transcription_model_id(binary, configured_model)
+    except OSError:
+        return True
+
+
+def transcription_config_key(language):
+    decode = "auto-detect-v1" if language == "auto" else language
+    return f"{decode}|loudnorm-i20-tp15-lra11-v1"
+
+
+def _transcription_model_id(binary, model):
+    binary_path, model_path = Path(binary).resolve(), Path(model).resolve()
+    binary_stat, model_stat = binary_path.stat(), model_path.stat()
+    return "|".join(map(str, (
+        binary_path, model_path, binary_stat.st_size, binary_stat.st_mtime_ns,
+        model_stat.st_size, model_stat.st_mtime_ns,
+    )))
+
+
 def transcription_model_id():
     binary = executable("whisper-cli", "WHISPER_CPP_PATH")
     model = os.environ.get("WHISPER_MODEL_PATH", "")
     if not model or not Path(model).is_file():
-        raise MediaError("Set WHISPER_MODEL_PATH to a downloaded whisper.cpp multilingual base model.")
-    return f"{binary}|{Path(model).resolve()}"
+        raise MediaError("Set WHISPER_MODEL_PATH to a downloaded multilingual whisper.cpp model.")
+    return _transcription_model_id(binary, model)
 
 
 def _run(command, cancel):
@@ -276,8 +309,14 @@ def render(source, clip, edit, segments, job_id, cancel, progress):
     ffmpeg = executable("ffmpeg", "FFMPEG_PATH")
     if edit["resolution"] == "1080":
         width, height = 1080, 1920
+        # ponytail: AMF at 1080 only; RX 570 measured 1.7x faster. Keep x264 at 720; AMF SSIM lower.
+        video_encoder = [
+            "-c:v", "h264_amf", "-quality", "balanced", "-rc", "vbr_peak",
+            "-b:v", "4000k", "-maxrate", "6000k", "-bufsize", "8000k",
+        ]
     else:
         width, height = 720, 1280
+        video_encoder = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"]
     start = clip["start"] + edit["trim_start"]
     end = clip["start"] + edit["trim_end"]
     duration = end - start
@@ -294,7 +333,7 @@ def render(source, clip, edit, segments, job_id, cancel, progress):
     command = [
         ffmpeg, "-hide_banner", "-nostdin", "-y", "-ss", f"{start:.3f}", "-i", str(source),
         "-t", f"{duration:.3f}", "-map", "0:v:0", "-map", "0:a?", "-vf", ",".join(filters),
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
+        *video_encoder, "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "-progress", "pipe:1",
         "-stats_period", "0.5", "-nostats", str(target),
     ]

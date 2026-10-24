@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Clapperboard, Film, FolderOpen, Gauge, Home, Scissors, Settings2 } from "lucide-react";
+import { Clapperboard, Film, FolderOpen, Gauge, Home, Scissors, Settings2, Youtube } from "lucide-react";
 import { ReactNode, useEffect, useState } from "react";
 import { API } from "@/lib/api";
 
@@ -11,6 +11,7 @@ const nav = [
   { href: "/create", label: "Buat Klip AI", icon: Scissors },
   { href: "/library", label: "Video Library", icon: FolderOpen },
   { href: "/clips", label: "Clip Library", icon: Film },
+  { href: "/accounts", label: "Akun", icon: Youtube },
   { href: "/settings", label: "Pengaturan", icon: Settings2 },
 ];
 
@@ -39,7 +40,7 @@ export function Shell({ children }: { children: ReactNode }) {
         <div className="sidebar-bottom">
           <div className="local-card"><div className="local-card-icon"><Gauge size={17} /></div><div><strong>Local workspace</strong><span>File tetap di perangkat ini</span></div></div>
           <div className="sidebar-status"><i className={online ? "status-dot" : "status-dot offline"} />{online ? "Backend terhubung" : "Backend offline"}</div>
-          <div className="sidebar-footer">KLIPNARA <span>V1.0</span></div>
+          <div className="sidebar-footer">KLIPNARA <span>V1.1</span></div>
         </div>
       </aside>
       <div className="main-column">

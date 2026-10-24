@@ -1,5 +1,7 @@
 import json
 import re
+from collections import deque
+from copy import deepcopy
 
 
 SCHEMA = {
@@ -24,24 +26,99 @@ SCHEMA = {
     "additionalProperties": False,
 }
 
+RANK_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "ranking": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"id": {"type": "integer"}, "reason": {"type": "string"}},
+                "required": ["id", "reason"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["ranking"],
+    "additionalProperties": False,
+}
 
-def transcript_chunks(segments, window=180, overlap=90):
-    """Split long transcripts on segment boundaries; keep a short timestamped overlap."""
+
+def transcript_chunks(segments, window=180, overlap=25):
+    """Split near sentence endings, with bounded timestamp overlap."""
     if not segments:
         return []
-    chunks, chunk, start = [], [], float(segments[0]["start"])
-    end = start + window
-    for segment in segments:
-        if chunk and float(segment["start"]) >= end:
-            chunks.append(chunk)
-            cutoff = end - overlap
-            chunk = [item for item in chunk if float(item["end"]) > cutoff]
-            start = float(chunk[0]["start"]) if chunk else float(segment["start"])
-            end = start + window
-        chunk.append(segment)
-    if chunk:
-        chunks.append(chunk)
+    chunks, cursor = [], 0
+    while cursor < len(segments):
+        target = float(segments[cursor]["start"]) + window
+        upper = cursor
+        while upper + 1 < len(segments) and float(segments[upper + 1]["start"]) < target:
+            upper += 1
+        sentence_ends = [index for index in range(cursor, upper + 1) if _sentence_end(segments[index]["text"])]
+        end_index = sentence_ends[-1] if sentence_ends else upper
+        chunks.append(segments[cursor:end_index + 1])
+        if end_index >= len(segments) - 1:
+            break
+        cutoff = float(segments[end_index]["end"]) - overlap
+        starts = [
+            index for index in range(cursor + 1, end_index + 1)
+            if float(segments[index]["start"]) >= cutoff and _sentence_end(segments[index - 1]["text"])
+        ]
+        next_cursor = starts[0] if starts else next(
+            (index for index in range(cursor + 1, len(segments)) if float(segments[index]["start"]) >= cutoff),
+            end_index + 1,
+        )
+        cursor = next_cursor if next_cursor > cursor else end_index + 1
     return chunks
+
+
+def candidate_schema(limit):
+    schema = deepcopy(SCHEMA)
+    schema["properties"]["clips"]["maxItems"] = limit
+    return schema
+
+
+def ranking_schema(limit):
+    schema = deepcopy(RANK_SCHEMA)
+    schema["properties"]["ranking"]["maxItems"] = limit
+    return schema
+
+
+def _sentence_end(text):
+    return str(text).rstrip().endswith((".", "!", "?", "。", "！", "？"))
+
+
+def split_oversized_chunk(chunk, overlap=25):
+    """Split at a measured segment boundary; prefer punctuation near temporal midpoint."""
+    if len(chunk) < 2:
+        return None
+    midpoint = (float(chunk[0]["start"]) + float(chunk[-1]["end"])) / 2
+    boundaries = [index for index in range(1, len(chunk)) if _sentence_end(chunk[index - 1]["text"])]
+    split = min(boundaries, key=lambda index: abs(float(chunk[index]["start"]) - midpoint)) if boundaries else len(chunk) // 2
+    if not 0 < split < len(chunk):
+        return None
+    cutoff = float(chunk[split]["start"]) - overlap
+    overlap_starts = [index for index in range(1, split + 1) if float(chunk[index]["start"]) >= cutoff and _sentence_end(chunk[index - 1]["text"])]
+    right_start = overlap_starts[0] if overlap_starts else next(
+        (index for index in range(1, split + 1) if float(chunk[index]["start"]) >= cutoff), split
+    )
+    left, right = chunk[:split], chunk[right_start:]
+    return (left, right) if left and right and len(left) < len(chunk) and len(right) < len(chunk) else None
+
+
+def token_bounded_chunks(chunks, count_tokens, maximum):
+    """Split chunks until measured prompt size fits; preserve ordered overlap."""
+    pending, bounded = deque(chunks), []
+    while pending:
+        chunk = pending.popleft()
+        if count_tokens(chunk) <= maximum:
+            bounded.append(chunk)
+            continue
+        split = split_oversized_chunk(chunk)
+        if split is None:
+            raise ValueError("A transcript segment exceeds Ollama context and cannot be split safely.")
+        pending.extendleft(reversed(split))
+    return bounded
 
 
 def parse_and_validate(raw, *, duration, minimum, maximum, limit, chunk_start=0, chunk_end=None, segments=None):
@@ -120,14 +197,60 @@ def expand_to_speech_boundaries(start, end, segments, minimum, maximum, chunk_st
 def prompt_for(segments, duration, minimum, maximum, limit, language):
     lines = [f"[{s['start']:.2f}-{s['end']:.2f}] {s['text']}" for s in segments]
     return (
-        "Choose and rank self-contained, engaging short-video moments from this timestamped transcript. "
-        "Prefer a clear hook, useful insight or punchline; keep complete context and sentence "
-        "boundaries. Copy timestamps from the transcript, never invent them. Return only JSON "
-        "matching the required schema. Scores are not viral predictions.\n"
-        f"Language: {language}. Source duration: {duration:.2f}s. "
-        f"Clip duration: {minimum}-{maximum}s. Return up to {limit} clips.\n"
+        "Select up to the requested number of engaging, self-contained clips. Prefer a hook, useful "
+        "insight or conclusion. Preserve context and sentence boundaries. Use concise titles and one-sentence "
+        "reasons under 120 characters. Use only transcript timestamps; return best-first JSON, no invented "
+        "times or viral claims.\n"
+        f"Language: {language}. Source duration: {duration:.1f}s. Clip length: {minimum}-{maximum}s. "
+        f"Return up to {limit}.\n"
         + "\n".join(lines)
     )
+
+
+def rank_prompt(candidates, segments, limit, language, excerpt_limit=120):
+    rows = []
+    for index, candidate in enumerate(candidates):
+        excerpt = " ".join(
+            item["text"] for item in segments
+            if float(item["end"]) > candidate["start"] and float(item["start"]) < candidate["end"]
+        )
+        rows.append(
+            f"[{index}] {candidate['start']:.1f}-{candidate['end']:.1f}s | {candidate['title'][:80]} | "
+            f"{candidate['reason'][:160]} | {excerpt[:excerpt_limit]}"
+        )
+    return (
+        f"Rank these transcript-only clip candidates best-first. Choose up to {limit}. "
+        f"Prefer a strong opening, complete context, useful information and a natural ending. "
+        f"Language: {language}. Return only JSON with candidate IDs and short ranking reasons.\n"
+        + "\n".join(rows)
+    )
+
+
+def parse_ranking(raw, candidates, limit):
+    try:
+        response = json.loads(raw) if isinstance(raw, str) else raw
+        ranking = response["ranking"]
+        if not isinstance(ranking, list):
+            raise ValueError
+    except (ValueError, TypeError, KeyError) as exc:
+        raise ValueError("AI response must contain a JSON object with a ranking array.") from exc
+    ranked, seen = [], set()
+    for item in ranking:
+        if not isinstance(item, dict) or type(item.get("id")) is not int:
+            continue
+        index = item["id"]
+        if index in seen or not 0 <= index < len(candidates):
+            continue
+        seen.add(index)
+        candidate = dict(candidates[index])
+        if isinstance(item.get("reason"), str) and item["reason"].strip():
+            candidate["reason"] = item["reason"][:500]
+        ranked.append(candidate)
+        if len(ranked) == limit:
+            break
+    if not ranked:
+        raise ValueError("Global AI ranking returned no known candidate IDs.")
+    return ranked
 
 
 def normalize_for_provider(raw):

@@ -1,4 +1,9 @@
 export const API = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+export type ReviewStatus = "needs_review" | "approved" | "needs_revision";
+
+export function reviewStatusLabel(status: ReviewStatus) {
+  return status === "approved" ? "Disetujui" : status === "needs_revision" ? "Perlu Revisi" : "Perlu Review";
+}
 
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);

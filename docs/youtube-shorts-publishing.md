@@ -2,6 +2,8 @@
 
 Implementation and operations guide for Klipnara's personal, local-first YouTube publisher. Feature uses official YouTube Data API v3 only. No AI caption generation, scheduled posting, or other social platforms.
 
+System integration and persistence are described in [API and Database](api-and-database.md); first-time runtime setup is in [Getting Started](getting-started.md).
+
 ## Scope and invariants
 
 - OAuth: Google Authorization Code Flow, backend-only client secret, minimum requested scope `https://www.googleapis.com/auth/youtube.upload`.
@@ -10,6 +12,8 @@ Implementation and operations guide for Klipnara's personal, local-first YouTube
 - Metadata is manual: title, description, tags, privacy, Made for Kids, synthetic-media disclosure. Privacy default is `private`; user confirms values before enqueue.
 - No request is marked `published` until YouTube returns video ID and `videos.list` confirms processed status, expected channel, and requested privacy.
 - `videos.insert` upload is resumable. Progress uses server-acknowledged `Range` bytes. Unknown upload outcome fails closed; no blind retry.
+
+Implemented in `backend/clipper/youtube.py`, FastAPI routes in `backend/clipper/main.py`, queue integration in `backend/clipper/jobs.py`, schema in `backend/clipper/db.py`, Connected Accounts/history in `frontend/app/accounts/page.tsx`, and publish form in `frontend/app/clips/[id]/page.tsx`.
 
 ## Google Cloud setup
 
@@ -35,6 +39,8 @@ Implementation and operations guide for Klipnara's personal, local-first YouTube
 `YOUTUBE_REDIRECT_URI` must use a loopback host, explicit port, and exact callback path. Browser starts OAuth on same host as redirect URI so HttpOnly state cookie returns to callback. `YOUTUBE_FRONTEND_URL` must be a local frontend URL. Backend should remain bound to loopback.
 
 Google OAuth external apps in Testing can have limited refresh-token lifetime; reauthorize after `invalid_grant`. If Google returns no refresh token, revoke Klipnara in Google Account settings and connect again with consent. Accounts exposing multiple channels have no chooser in V1.1; returned video channel ID is checked before `Published`.
+
+Account state map: `connected` after token exchange and channel lookup; `expired` after missing/invalid refresh token (`invalid_grant`); `error` after rejected OAuth client/refreshed auth; `disconnected` after user action clears local ciphertext and revocation is attempted. Reconnect can reuse an existing account row by channel ID.
 
 ## Credential and callback security
 
@@ -70,7 +76,9 @@ Main routes:
 
 Generic `/api/jobs/{id}/retry` and `/cancel` do not control YouTube uploads. Publishing actions go through publication endpoints so duplicate reconciliation and cancellation rules stay enforced.
 
-Duplicate protection is per connected account and exact approved-render SHA-256. A new changed render can be published after it is approved again; same bytes cannot be uploaded twice to same account. Pending/uploading clips cannot be edited, re-reviewed, rerendered, or deleted. Processing/published history remains available separately from render/review states.
+Publish request requires `account_id`, nonblank `title` (≤100 characters), `made_for_kids` boolean, and `contains_synthetic_media` boolean. `description` is optional (≤5000 characters), `tags` optional (combined text ≤500 characters), and `privacy_status` is `private`, `unlisted`, or `public` (default `private`).
+
+Duplicate protection is per connected account and exact approved-render SHA-256. A new changed render can be published after it is approved again; same bytes cannot be uploaded twice to same account. Pending/uploading clips cannot be edited, re-reviewed, rerendered, or deleted. Cancellation requires publication `pending`, worker queued/preparing, and `upload_started=false`; after bytes may have been sent, user must resume/reconcile rather than cancel. Processing/published history remains available separately from render/review states.
 
 ## Upload and reconciliation behavior
 

@@ -177,13 +177,15 @@ class JobRunner:
             run_upload(json.loads(job["options_json"])["publication_id"], cancel, upload_progress)
             update_job(job["id"], status="completed", phase="completed", progress=1, message="Video diterima YouTube; menunggu processing")
             return
-        if job["kind"] == "render":
+        if job["kind"] in {"render", "quick_clip"}:
             self._render_job(job, source, options, cancel)
             return
         if transcript_cache_matches(source, options["language"]):
             segments = json.loads(source["transcript_json"])
             language = source["transcript_language"] or "unknown"
         else:
+            if not source.get("audio_codec"):
+                raise MediaError("AI Smart Clip transcription requires source audio. Use Quick Clip for silent video.")
             update_job(job["id"], status="preparing", phase="preparing", message="Ekstrak audio sumber")
             audio = WORK_DIR / f"{job['id']}.wav"
             ffmpeg = executable("ffmpeg", "FFMPEG_PATH")
@@ -354,6 +356,7 @@ class JobRunner:
         output = render(
             source["path"], clip, options["edit"], segments, job["id"], cancel,
             lambda value: update_job(job["id"], status="rendering", phase="rendering", progress=value, message="Render FFmpeg · progress encoder nyata"),
+            has_audio=bool(source.get("audio_codec")),
         )
         with connect() as conn:
             old = conn.execute("SELECT rendered_path FROM clips WHERE id=?", (clip["id"],)).fetchone()["rendered_path"]

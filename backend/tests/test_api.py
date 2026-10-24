@@ -31,9 +31,9 @@ def run():
         source_id = uuid.uuid4().hex
         with connect() as conn:
             conn.execute(
-                "INSERT INTO sources(id,name,path,size_bytes,duration,width,height,video_codec,sha256,created_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (source_id, "test.mp4", "unavailable.mp4", 1, 120, 1280, 720, "h264", "test", now()),
+                "INSERT INTO sources(id,name,path,size_bytes,duration,width,height,video_codec,audio_codec,sha256,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (source_id, "test.mp4", "unavailable.mp4", 1, 120, 1280, 720, "h264", "aac", "test", now()),
             )
         endpoint = f"/api/sources/{source_id}/generate"
         cloud = {"provider": "openai", "consent": False}

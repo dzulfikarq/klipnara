@@ -12,11 +12,14 @@ flowchart LR
     API --> FS[Managed source/output folders]
     API --> Q[Persisted jobs table]
     Q --> W[Single in-process JobRunner]
-    W --> F[FFmpeg / ffprobe]
-    W --> WH[whisper.cpp]
-    W --> OL[Ollama localhost]
-    W -. explicit per-job consent .-> CLOUD[OpenAI or Gemini]
-    W -. encrypted server-side OAuth token .-> YT[YouTube Data API v3]
+    W --> D{Job kind}
+    D -->|quick_clip / render| F[FFmpeg]
+    D -->|generate, transcript cache miss| WH[FFmpeg audio → whisper.cpp]
+    D -->|generate| AI{AI provider}
+    AI -->|default local| OL[Ollama localhost]
+    AI -. explicit per-job consent .-> CLOUD[OpenAI or Gemini]
+    D -->|youtube_upload| YT[YouTube Data API v3<br/>encrypted server-side OAuth token]
+    W --> FP[ffprobe]
     W --> DB
     W --> FS
 ```
@@ -52,6 +55,7 @@ The worker is serial: it selects the oldest queued job, claims it transactionall
 - **Approval fingerprints:** `reviewed_render_sha256` binds approval to exact MP4 bytes. Changed edits, new render, or migrated old approval clears/requires fingerprint.
 - **DPAPI:** Windows user-scoped encryption avoids adding a crypto dependency or storing a portable key next to database. Moving data to another Windows account requires reconnecting YouTube.
 - **FFmpeg remains media engine:** x264 is used for 720p; tested RX 570 AMF encoder is used for 1080p. 1080p requires compatible FFmpeg/AMD driver.
+- **Quick Clip shares schema/renderer:** timestamp jobs reuse existing `jobs`/`clips` tables and FFmpeg render path; no transcript, schema migration, or second editor is needed.
 - **AI limits:** local Ollama prompts are measured and bounded before inference; no implicit cloud fallback. Cloud providers need explicit consent and receive transcript-only content.
 
 ## Runtime dependencies

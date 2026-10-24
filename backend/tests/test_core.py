@@ -11,11 +11,20 @@ from urllib.error import HTTPError, URLError
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from clipper.analysis import RANK_SCHEMA, candidate_schema, parse_and_validate, parse_ranking, ranking_schema, token_bounded_chunks, transcript_chunks
-from clipper.media import MediaError, _public_addresses, _write_ass, transcript_cache_matches, transcription_config_key, transcription_model_id, transcribe
+from clipper.media import MediaError, _public_addresses, _write_ass, probe, transcript_cache_matches, transcription_config_key, transcription_model_id, transcribe
 from clipper.providers import ProviderError, _post, _timeout_seconds, analyze, check_local, count_prompt_tokens, local_limits
 
 
 def run():
+    no_audio_probe = {"format": {"format_name": "mov,mp4,m4a", "duration": "60"}, "streams": [{
+        "codec_type": "video", "codec_name": "h264", "width": 720, "height": 1280,
+    }]}
+    with patch("clipper.media.executable", return_value="ffprobe"), patch(
+        "clipper.media.subprocess.run", return_value=SimpleNamespace(stdout=json.dumps(no_audio_probe)),
+    ):
+        probed = probe(Path("silent.mp4"))
+    assert probed["audio_codec"] is None and probed["duration"] == 60
+
     assert candidate_schema(2)["properties"]["clips"]["maxItems"] == 2
     assert ranking_schema(3)["properties"]["ranking"]["maxItems"] == 3
     assert local_limits() == (4096, 1536, 2304)

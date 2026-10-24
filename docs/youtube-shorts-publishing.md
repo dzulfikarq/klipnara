@@ -7,7 +7,8 @@ System integration and persistence are described in [API and Database](api-and-d
 ## Scope and invariants
 
 - OAuth: Google Authorization Code Flow, backend-only client secret, minimum requested scope `https://www.googleapis.com/auth/youtube.upload`.
-- Publish eligibility: clip review is `approved`; render status is `completed`; current non-empty MP4 is inside managed clip storage, contains H.264/AAC, is square or portrait, is at most 180 seconds, and matches SHA-256 stored at approval.
+- Publish eligibility: clip review is `approved`; render status is `completed`; current non-empty MP4 is inside managed clip storage, contains H.264/AAC, is square or portrait, is at most 180 seconds, and matches SHA-256 stored at approval. Silent-source Quick Clips receive a silent AAC track from FFmpeg and still use same gate.
+- Quick Clip and AI Smart Clip share existing approval and upload checks; direct timestamp cut does not trigger AI or auto-publish.
 - Publication lifecycle is independent of clip review/render lifecycle: `pending`, `uploading`, `processing`, `published`, `failed`, `cancelled`.
 - Metadata is manual: title, description, tags, privacy, Made for Kids, synthetic-media disclosure. Privacy default is `private`; user confirms values before enqueue.
 - No request is marked `published` until YouTube returns video ID and `videos.list` confirms processed status, expected channel, and requested privacy.

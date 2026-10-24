@@ -1,14 +1,31 @@
 # Features and Workflows
 
-This page describes workflows present in current source. Current primary flow is AI candidate generation followed by human review/edit/render. Timestamp-first Quick Clip and cloud transcription are **planned**, not implemented; see [Roadmap](roadmap.md).
+This page describes workflows present in current source. **Quick Clip is the default/main mode**; AI Smart Clip remains optional. Cloud transcription is **planned**, not implemented; see [Roadmap](roadmap.md).
 
-## Source video workflow
+## Source selection
 
-1. **Import:** browser submits MP4/MOV upload or direct URL. Backend checks size, free space, file format, codecs, duration and audio via ffprobe. URL ingest requires public HTTPS media response on port 443, resolves/pins public IP, validates each redirect (maximum three), and rejects site pages/private addresses.
+1. **Import:** browser submits MP4/MOV upload, selects stored source, or imports direct URL. Backend checks size, free space, file format, video codec, duration and audio metadata via ffprobe. Audio is optional for Quick Clip; AI Smart Clip requires audio when transcription cache misses. URL ingest requires public HTTPS media response on port 443, resolves/pins public IP, validates each redirect (maximum three), and rejects site pages/private addresses.
 2. **Persist:** source file is written under managed source root; `sources` row holds metadata, hash, and later transcript cache. Original media remains separate from generated clips.
-3. **Generate:** user chooses count 3/5/10, target duration 15–30/30–60/60–90 seconds, subtitle style, resolution 720/1080, center/manual focus, language auto/Indonesian/English, and provider local/OpenAI/Gemini.
-4. **Transcribe and analyze:** if the transcript cache matches language/config/model fingerprint, it is reused. Otherwise FFmpeg extracts normalized mono 16 kHz PCM and whisper.cpp writes timestamped segments. AI chooses candidates, validates time boundaries and deduplicates overlapping candidates. Source and transcript are local. Cloud provider receives transcript/timestamps and job instructions only, after explicit consent.
-5. **Review:** candidate cards show rank/title/reason and `review_status=needs_review`. User opens Clip Editor to inspect source, edit and render.
+
+## Quick Clip (default)
+
+1. Choose uploaded MP4/MOV, direct URL import, or source already in Video Library.
+2. Preview original source; enter Start/End in `MM:SS` or `HH:MM:SS`, or capture either value from video playhead.
+3. Backend validates finite `0 <= start < end <= source.duration`; there is no product-imposed maximum clip length. User enters title and chooses 720p (default) or 1080p. Output aspect is fixed portrait 9:16; initial subtitle setting is off.
+4. `POST /api/sources/{id}/quick-clips` creates a `quick_clip` job and ordinary `clips` row in one SQLite transaction. It does not create a transcript, AI candidate, fake transcript, or AI usage record.
+5. Existing single worker sends only selected in/out to FFmpeg; after render user can open same Clip Editor, approve/revise, download or publish through YouTube flow.
+
+Quick Clip never calls `transcribe`, `count_prompt_tokens`, `analyze`, Ollama, OpenAI or Gemini. It works with a silent source. Renderer creates a silent stereo AAC track (`anullsrc`) for silent input so final H.264/AAC review/YouTube contract stays valid. Quick Clip subtitles remain unavailable without a transcript; subtitle toggle is disabled in that case.
+
+## AI Smart Clip (optional)
+
+Choose mode **AI Smart Clip** to use existing workflow. User chooses count 3/5/10, target duration 15–30/30–60/60–90 seconds, subtitle style, 720/1080, center/manual focus, language auto/Indonesian/English, and local/OpenAI/Gemini provider.
+
+If transcript cache matches language/config/model fingerprint, it is reused. Otherwise FFmpeg extracts normalized mono 16 kHz PCM and whisper.cpp writes timestamped segments. AI chooses candidates, validates time boundaries and deduplicates overlaps. Cloud provider receives transcript/timestamps and instructions only after explicit consent.
+
+## Shared review and render
+
+Candidate AI clips and Quick Clips appear with source/candidate labels. Human review uses `review_status=needs_review` initially. User inspects source/final output in shared Clip Editor, changes trim/crop/subtitles where a transcript exists, then renders/approves/revises.
 
 ## Clip editing, render, approval
 
@@ -42,8 +59,8 @@ Publication statuses are `pending`, `uploading`, `processing`, `published`, `fai
 
 ## Current limits relevant to future features
 
-- App currently requires source import and candidate-generation flow; no Quick Clip timestamp form/route exists.
-- Whisper and Ollama are required for current default generation path; an AI-free timestamp cut and optional transcription are roadmap work, not current features.
+- Quick Clip is the default path; current AI Smart Clip still needs Whisper on cache miss and Ollama when local provider is selected.
+- Cloud transcription and making Whisper/Ollama optional for other AI workflows remain roadmap work; Quick Clip itself has no such dependency.
 - Highlight subtitles are phrase/segment based; word-level timing is not available.
 - Crop is fixed center/manual; no face tracking or timeline editor.
 - YouTube V1.1 is Post Now only; no scheduler, platform-wide video search, multi-channel chooser, or other social networks.

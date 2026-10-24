@@ -1,6 +1,6 @@
 # AI and Transcription Pipeline
 
-This guide covers actual transcription and highlight-generation code in `media.py`, `analysis.py`, `providers.py`, and `jobs.py`. It does not describe future Quick Clip or cloud transcription as implemented.
+This guide covers optional AI Smart Clip code in `media.py`, `analysis.py`, `providers.py`, and `jobs.py`. Quick Clip is separate and does not enter any path in this pipeline. Cloud transcription is planned, not implemented.
 
 ## Transcription
 
@@ -13,7 +13,7 @@ On cache miss:
 3. Whisper segments and detected language are persisted to source row. Phrase-level timestamps are used; `-ml 1` word timestamps are not enabled.
 4. Temporary WAV/JSON files are removed after use or worker cleanup.
 
-Model location comes from `WHISPER_MODEL_PATH`; `small` is recommended from available Indonesian benchmark, `base` is a faster lower-accuracy option. Current UI does not make Whisper optional; that is roadmap direction only.
+Model location comes from `WHISPER_MODEL_PATH`; `small` is recommended from available Indonesian benchmark, `base` is a faster lower-accuracy option. AI Smart Clip uses Whisper on a transcript-cache miss. Quick Clip is the primary timestamp workflow and never initializes Whisper or Ollama.
 
 ## Highlight generation
 
@@ -56,7 +56,7 @@ flowchart TD
 
 ## Recorded benchmark evidence
 
-Results are sample/workstation-specific, not product guarantees. Hardware/runtime audit: Windows 11 Pro build 26200, Intel i3-9100F (4C/4T), 15.9 GiB RAM, RX 570 4 GiB, Python 3.10.6, whisper.cpp v1.9.5 CPU build, Ollama 0.40.8 and Qwen 1.5B Q4_K_M. The 149.53 s FLEURS sample used 13 human-read Indonesian clips concatenated with 250 ms gaps; its test MP4 used synthetic FFmpeg `testsrc2` video.
+Results are sample/workstation-specific, not product guarantees. Hardware/runtime audit was recorded 22 Oct 2026: Windows 11 Pro build 26200, Intel i3-9100F (4C/4T), 15.9 GiB RAM, RX 570 4 GiB, Python 3.10.6, whisper.cpp v1.9.5 CPU build, Ollama 0.40.8 and Qwen 1.5B Q4_K_M. The 149.53 s FLEURS sample used 13 human-read Indonesian clips concatenated with 250 ms gaps; its test MP4 used synthetic FFmpeg `testsrc2` video.
 
 ### Earlier local app run (Whisper `base`)
 
@@ -112,6 +112,6 @@ Recorded output still contained likely ASR misspellings. No subjective audio rev
 - No diarization, word timestamps, translation, or speech-to-text cloud service is implemented.
 - Sentence/segment timestamps lead to phrase-level Highlight captions; long segments can wrap into multi-line subtitle blocks.
 - Prompt and model results vary by input and model; text model does not guarantee coherent or culturally accurate candidate explanations.
-- Quick Clip timestamp-based workflow and optional Whisper/Ollama are planned in [Roadmap](roadmap.md), not implemented here.
+- Quick Clip timestamp workflow is implemented in [Features and Workflows](features-and-workflows.md); it bypasses this AI pipeline. Future Cloud Transcription remains planned in [Roadmap](roadmap.md).
 
 For user flow see [Features and Workflows](features-and-workflows.md); test commands and non-verified cases are in [Testing and Troubleshooting](testing-and-troubleshooting.md).

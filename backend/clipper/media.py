@@ -58,8 +58,6 @@ def probe(path):
     if duration <= 0 or duration > 4 * 60 * 60 or min(width, height) < 1:
         raise MediaError("Video must be between 1 second and 4 hours long.")
     audio = next((item for item in streams if item.get("codec_type") == "audio"), None)
-    if audio is None:
-        raise MediaError("Video has no audio stream to transcribe.")
     return {
         "duration": duration,
         "width": width,
@@ -305,7 +303,7 @@ def _ass_escape(path):
     return str(path.resolve()).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'").replace(",", "\\,")
 
 
-def render(source, clip, edit, segments, job_id, cancel, progress):
+def render(source, clip, edit, segments, job_id, cancel, progress, has_audio=True):
     ffmpeg = executable("ffmpeg", "FFMPEG_PATH")
     if edit["resolution"] == "1080":
         width, height = 1080, 1920
@@ -330,9 +328,13 @@ def render(source, clip, edit, segments, job_id, cancel, progress):
         subtitle = WORK_DIR / f"{job_id}.ass"
         _write_ass(subtitle, segments, start, end, edit, height)
         filters.append(f"ass='{_ass_escape(subtitle)}'")
+    input_args = [ffmpeg, "-hide_banner", "-nostdin", "-y", "-ss", f"{start:.3f}", "-i", str(source)]
+    audio_map = "0:a?"
+    if not has_audio:
+        input_args.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"])
+        audio_map = "1:a:0"
     command = [
-        ffmpeg, "-hide_banner", "-nostdin", "-y", "-ss", f"{start:.3f}", "-i", str(source),
-        "-t", f"{duration:.3f}", "-map", "0:v:0", "-map", "0:a?", "-vf", ",".join(filters),
+        *input_args, "-t", f"{duration:.3f}", "-map", "0:v:0", "-map", audio_map, "-vf", ",".join(filters),
         *video_encoder, "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "-progress", "pipe:1",
         "-stats_period", "0.5", "-nostats", str(target),

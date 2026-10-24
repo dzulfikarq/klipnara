@@ -24,9 +24,14 @@ FastAPI is defined in `backend/clipper/main.py`, title **Klipnara**, version `1.
 | `GET /api/sources/{source_id}` | Source metadata/transcript and its clips; path/hash removed |
 | `GET /api/sources/{source_id}/file` | Inline original media |
 | `DELETE /api/sources/{source_id}` | Deletes source and child clips/render files; active source jobs block delete |
+| `POST /api/sources/{source_id}/quick-clips` | `QuickClipRequest`; queues timestamp-only render, no transcript or AI |
 | `POST /api/sources/{source_id}/generate` | `GenerateOptions`, returns queued job ID |
 
 `GenerateOptions` fields: `count` 3/5/10 (default 5); `duration` `15-30`/`30-60`/`60-90`; `style` Clean/Bold/Highlight; `subtitle_enabled`; `resolution` 720/1080; `focus` center/manual; `provider` local/openai/gemini; `language` auto/indonesia/english; `consent` boolean (false by default). Cloud providers require per-job consent and configured key.
+
+`QuickClipRequest`: nonblank `title` (max 120), `start` seconds (`>=0`), `end` seconds (`>0`, must exceed start and be `<=source.duration`), optional `resolution` 720/1080 (default 720). No maximum Quick Clip duration is imposed beyond source duration. Timestamp parser/preview is frontend-only; API receives seconds.
+
+`sources.audio_codec` is nullable. `probe()` accepts a video-only source; AI Smart Clip returns 409 when it would need to transcribe a source without audio, while Quick Clip proceeds without transcript.
 
 ### Clips, review and render
 
@@ -42,6 +47,8 @@ FastAPI is defined in `backend/clipper/main.py`, title **Klipnara**, version `1.
 | `DELETE /api/clips/{clip_id}` | Deletes clip/render; active render or pending/uploading publication blocks |
 
 `ClipEdit`: trim start/end, subtitle toggle, style, output resolution, crop x/y, subtitle size/position/color and indexed text overrides. Backend validates trim stays in candidate and subtitle override text ≤500 characters per segment.
+
+`quick_clip` jobs store an `edit` snapshot in existing `jobs.options_json` and a normal `clips` row. Initial edit uses full selected span, portrait center crop, 720p, subtitle disabled. `origin` returned by clip/source APIs is derived from parent `jobs.kind` (`quick_clip` vs `generate`); it is not a new column.
 
 ### Jobs
 
@@ -90,13 +97,13 @@ FastAPI returns HTTP errors with `detail`. Common status codes: 400 for unsuppor
 
 Indexes include `jobs(status,created_at)`, `clips(source_id,rank)`, publication history by creation time, and partial unique `(account_id,rendered_sha256)` while publication is Pending/Uploading/Processing/Published. Thus same exact approved file cannot be duplicated on same account; a changed, reapproved render can be posted as a new item. Publication `clip_id` has no FK so history survives clip/source deletion; account rows remain after disconnect.
 
-Migrations add `sources.transcript_config`, `clips.review_status`, and `clips.reviewed_render_sha256` if absent. Previously-approved rows without fingerprint are demoted to `needs_review`. Startup marks interrupted generic jobs failed; an in-flight YouTube item with known video ID resumes as Processing, an uncertain upload becomes Failed for reconciliation, and pending jobs whose worker stopped are marked Failed.
+Existing migrations add `sources.transcript_config`, `clips.review_status`, and `clips.reviewed_render_sha256` if absent. Previously-approved rows without fingerprint are demoted to `needs_review`. **Quick Clip adds no table or column and performs no data migration**; it uses existing `jobs.kind`, `clips`, and `edit_json`. Startup marks interrupted generic jobs failed; an in-flight YouTube item with known video ID resumes as Processing, an uncertain upload becomes Failed for reconciliation, and pending jobs whose worker stopped are marked Failed.
 
 ## Status lifecycle and worker
 
 ### Generic job status
 
-`queued` → `preparing` → (generation: `transcribing` → `analyzing` → `ready_for_review`; render: `rendering` → `completed`) or `failed`/`cancelled`. `ready_for_review` is generation job status, not a clip approval status. Queue selects oldest `queued` job; one worker thread runs at a time.
+`queued` → `preparing` → (generation: `transcribing` → `analyzing` → `ready_for_review`; render/quick_clip: `rendering` → `completed`) or `failed`/`cancelled`. `ready_for_review` is generation job status, not a clip approval status. Queue selects oldest `queued` job; one worker thread runs at a time.
 
 ### Clip status
 
@@ -111,5 +118,9 @@ Migrations add `sources.transcript_config`, `clips.review_status`, and `clips.re
 ## File paths
 
 Default Windows root is `%LOCALAPPDATA%\Klipnara`; `CLIPPER_DATA_DIR` overrides. Defaults: database `clipper.sqlite3`, temp/logs under `work`/data, sources at `sources`, clips at `clips`. `CLIPPER_SOURCE_DIR` and `CLIPPER_CLIP_DIR` override media roots independently. Render files are named `{clip_id}-{job_id}.mp4`; transient transcription audio/ASS files are removed after job. Do not expose backend to LAN without adding authentication; current CORS/loopback setup is not a multi-user security boundary.
+
+### Backup and rollback
+
+Quick Clip does not alter the SQLite schema; current code adds jobs/clips rows and files under configured output storage. Existing V1.1 additive review/YouTube migrations still run at startup. Before updating a real installation, stop backend/Uvicorn so SQLite WAL is closed, back up the full `DATA_DIR` plus configured source and clip roots, and retain the current application version. For rollback, stop backend, restore the database and media roots from the same snapshot, then restart the prior application version. Do not copy only the `.sqlite3` file while the process is running; WAL may contain committed data not checkpointed into that file.
 
 For installation values see [Getting Started](getting-started.md); end-user lifecycle is in [Features and Workflows](features-and-workflows.md).

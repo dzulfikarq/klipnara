@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import { API, formatDuration, request, reviewStatusLabel } from "@/lib/api";
 import type { ReviewStatus } from "@/lib/api";
 
-type Clip = { id: string; source_id: string; title: string; status: string; review_status: ReviewStatus; source_name: string; start: number; end: number; rendered: boolean; reason: string; rank: number };
+type Clip = { id: string; source_id: string; title: string; status: string; origin: string; review_status: ReviewStatus; source_name: string; start: number; end: number; rendered: boolean; reason: string; rank: number };
 
 export default function ClipLibraryPage() {
   const [clips, setClips] = useState<Clip[]>([]);

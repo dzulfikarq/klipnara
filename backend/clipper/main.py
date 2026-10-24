@@ -1,6 +1,7 @@
 import hashlib
 import json
 import logging
+import math
 import os
 import platform
 import re
@@ -8,6 +9,7 @@ import shutil
 import subprocess
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
 from typing import Literal
@@ -20,7 +22,7 @@ from pydantic import BaseModel, Field
 from .config import CLIP_DIR, DATA_DIR, LEGACY_CLIP_DIR, LEGACY_SOURCE_DIR, MAX_UPLOAD_BYTES, MIN_FREE_BYTES, SOURCE_DIR, WORK_DIR
 from .db import connect, init_db, unpack
 from .jobs import create_job, now, runner
-from .media import MediaError, download_url, probe, save_upload
+from .media import MediaError, download_url, probe, save_upload, transcript_cache_matches
 from .providers import ProviderError, check_local
 from . import youtube
 
@@ -48,6 +50,13 @@ class GenerateOptions(BaseModel):
     provider: Literal["local", "openai", "gemini"] = "local"
     language: Literal["auto", "indonesia", "english"] = "auto"
     consent: bool = False
+
+
+class QuickClipRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    start: float = Field(ge=0)
+    end: float = Field(gt=0)
+    resolution: Literal["720", "1080"] = "720"
 
 
 class ClipEdit(BaseModel):
@@ -343,7 +352,11 @@ def get_source(source_id: str):
             raise HTTPException(404, "Video source not found.")
         clips = [
             unpack(row, ("edit_json",))
-            for row in conn.execute("SELECT * FROM clips WHERE source_id=? ORDER BY rank,created_at", (source_id,)).fetchall()
+            for row in conn.execute(
+                "SELECT c.*,j.kind AS origin FROM clips c JOIN jobs j ON j.id=c.job_id "
+                "WHERE c.source_id=? ORDER BY c.rank,c.created_at",
+                (source_id,),
+            ).fetchall()
         ]
     for clip in clips:
         clip["rendered"] = bool(clip.pop("rendered_path"))
@@ -387,10 +400,59 @@ def delete_source(source_id: str):
     return {"deleted": True}
 
 
+@app.post("/api/sources/{source_id}/quick-clips")
+def create_quick_clip(source_id: str, body: QuickClipRequest):
+    _require_storage(CLIP_DIR)
+    if not math.isfinite(body.start) or not math.isfinite(body.end) or body.end <= body.start:
+        raise HTTPException(422, "End Time must be greater than Start Time.")
+    title = body.title.strip()
+    if not title:
+        raise HTTPException(422, "Clip title is required.")
+    job_id, clip_id, timestamp = uuid.uuid4().hex, uuid.uuid4().hex, now()
+    edit = {
+        "trim_start": 0,
+        "trim_end": body.end - body.start,
+        "subtitle_enabled": False,
+        "style": "Clean",
+        "resolution": body.resolution,
+        "crop_x": 50,
+        "crop_y": 50,
+        "subtitle_size": 48,
+        "subtitle_position": 82,
+        "subtitle_color": "#ffffff",
+        "subtitle_overrides": {},
+    }
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        source_row = conn.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone()
+        if source_row is None:
+            raise HTTPException(404, "Video source not found.")
+        source = dict(source_row)
+        _source_path(source)
+        if body.end > source["duration"]:
+            raise HTTPException(422, "End Time cannot exceed source video duration.")
+        rank = conn.execute("SELECT COALESCE(MAX(rank),0)+1 AS next_rank FROM clips WHERE source_id=?", (source_id,)).fetchone()["next_rank"]
+        conn.execute(
+            "INSERT INTO jobs(id,source_id,clip_id,kind,status,phase,progress,message,options_json,created_at,updated_at) "
+            "VALUES(?,?,?,'quick_clip','queued','queued',NULL,'Quick Clip menunggu render',?,?,?)",
+            (job_id, source_id, clip_id, json.dumps({"edit": edit}), timestamp, timestamp),
+        )
+        conn.execute(
+            "INSERT INTO clips(id,source_id,job_id,start,end,title,reason,rank,edit_json,status,review_status,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,'ready','needs_review',?)",
+            (
+                clip_id, source_id, job_id, body.start, body.end, title,
+                "Dibuat manual berdasarkan timestamp pengguna.", rank, json.dumps(edit), timestamp,
+            ),
+        )
+    return {"id": job_id, "clip_id": clip_id, "status": "queued"}
+
+
 @app.post("/api/sources/{source_id}/generate")
 def generate(source_id: str, body: GenerateOptions):
     with connect() as conn:
-        if not conn.execute("SELECT id FROM sources WHERE id=?", (source_id,)).fetchone():
+        source = conn.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone()
+        if source is None:
             raise HTTPException(404, "Video source not found.")
     if body.provider != "local" and not body.consent:
         raise HTTPException(400, "Confirm per-job transcript sharing before using cloud AI.")
@@ -398,6 +460,8 @@ def generate(source_id: str, body: GenerateOptions):
         raise HTTPException(400, "Set OPENAI_API_KEY in backend environment before selecting OpenAI.")
     if body.provider == "gemini" and not os.environ.get("GEMINI_API_KEY"):
         raise HTTPException(400, "Set GEMINI_API_KEY in backend environment before selecting Gemini.")
+    if not source["audio_codec"] and not transcript_cache_matches(dict(source), body.language):
+        raise HTTPException(409, "AI Smart Clip transcription requires source audio. Use Quick Clip for silent video.")
     minimum, maximum = map(int, body.duration.split("-"))
     options = {
         "count": body.count,
@@ -420,8 +484,10 @@ def list_clips():
         return [
             dict(row)
             for row in conn.execute(
-                "SELECT c.id,c.source_id,c.start,c.end,c.title,c.reason,c.rank,c.status,c.review_status,(c.rendered_path IS NOT NULL) AS rendered,c.created_at,s.name AS source_name "
-                "FROM clips c JOIN sources s ON s.id=c.source_id ORDER BY c.created_at DESC,c.rank"
+                "SELECT c.id,c.source_id,c.start,c.end,c.title,c.reason,c.rank,c.status,c.review_status,j.kind AS origin,"
+                "(c.rendered_path IS NOT NULL) AS rendered,c.created_at,s.name AS source_name "
+                "FROM clips c JOIN sources s ON s.id=c.source_id JOIN jobs j ON j.id=c.job_id "
+                "ORDER BY c.created_at DESC,c.rank"
             ).fetchall()
         ]
 
@@ -429,7 +495,10 @@ def list_clips():
 @app.get("/api/clips/{clip_id}")
 def get_clip(clip_id: str):
     with connect() as conn:
-        clip = unpack(conn.execute("SELECT * FROM clips WHERE id=?", (clip_id,)).fetchone(), ("edit_json",))
+        clip = unpack(
+            conn.execute("SELECT c.*,j.kind AS origin FROM clips c JOIN jobs j ON j.id=c.job_id WHERE c.id=?", (clip_id,)).fetchone(),
+            ("edit_json",),
+        )
         if clip is None:
             raise HTTPException(404, "Clip not found.")
         source_row = conn.execute("SELECT * FROM sources WHERE id=?", (clip["source_id"],)).fetchone()
@@ -473,6 +542,10 @@ def edit_clip(clip_id: str, body: ClipEdit):
             elif edit["style"] == "Highlight" and edit["subtitle_color"].lower() == "#ffd700":
                 changes["subtitle_color"] = "#ffffff"
         edit.update(changes)
+        if edit.get("subtitle_enabled", True) and not conn.execute(
+            "SELECT transcript_json FROM sources WHERE id=?", (clip["source_id"],)
+        ).fetchone()["transcript_json"]:
+            raise HTTPException(409, "This clip has no transcript. Generate an AI transcript before enabling subtitles.")
         length = clip["end"] - clip["start"]
         edit.setdefault("trim_start", 0)
         edit.setdefault("trim_end", length)
@@ -529,9 +602,10 @@ def render_clip(clip_id: str):
             (clip_id,),
         ).fetchone():
             raise HTTPException(409, "Cancel pending YouTube upload before rendering this clip.")
-        if conn.execute("SELECT transcript_json FROM sources WHERE id=?", (clip["source_id"],)).fetchone()["transcript_json"] is None:
-            raise HTTPException(409, "Generate transcript before rendering subtitles.")
         edit = json.loads(clip["edit_json"])
+        source = conn.execute("SELECT transcript_json FROM sources WHERE id=?", (clip["source_id"],)).fetchone()
+        if edit.get("subtitle_enabled", True) and not source["transcript_json"]:
+            raise HTTPException(409, "Generate a transcript before rendering subtitles.")
         conn.execute(
             "UPDATE clips SET status=CASE WHEN rendered_path IS NULL THEN 'ready' ELSE 'needs_render' END,"
             "review_status='needs_review',reviewed_render_sha256=NULL WHERE id=?",

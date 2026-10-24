@@ -1,0 +1,16 @@
+{
+  "name": "klipnara-dev",
+  "version": "2.0.0",
+  "private": true,
+  "scripts": {
+    "predev": "node scripts/check-dev.js all",
+    "dev": "concurrently --kill-others --names BACKEND,FRONTEND --prefix-colors green,cyan \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "predev:backend": "node scripts/check-dev.js backend",
+    "dev:backend": "node scripts/dev-backend.js",
+    "predev:frontend": "node scripts/check-dev.js frontend",
+    "dev:frontend": "npm --prefix frontend run dev"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}

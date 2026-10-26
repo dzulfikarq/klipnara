@@ -8,7 +8,7 @@ import { API } from "@/lib/api";
 
 const nav = [
   { href: "/", label: "Ringkasan", icon: Home },
-  { href: "/create", label: "Buat Klip AI", icon: Scissors },
+  { href: "/create", label: "Buat Video", icon: Scissors },
   { href: "/library", label: "Video Library", icon: FolderOpen },
   { href: "/clips", label: "Clip Library", icon: Film },
   { href: "/accounts", label: "Akun", icon: Youtube },
@@ -21,14 +21,14 @@ export function Shell({ children }: { children: ReactNode }) {
   useEffect(() => {
     fetch(`${API}/api/health`).then((res) => setOnline(res.ok)).catch(() => setOnline(false));
   }, [path]);
-  const current = nav.find((item) => item.href === path)?.label || (path.startsWith("/sources/") ? "Review kandidat" : "Editor klip");
+  const current = nav.find((item) => item.href === path)?.label || (path.startsWith("/sources/") ? "Review kandidat" : path.startsWith("/mood") ? "AI Mood Quotes" : "Editor klip");
 
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <Link href="/" className="brand">
           <span className="brand-mark"><Clapperboard size={21} strokeWidth={2.1} /></span>
-          <span>Klipnara<small>AI VIDEO CLIPPER &amp; PUBLISHER</small></span>
+          <span>Klipnara<small>AI VIDEO STUDIO</small></span>
         </Link>
         <div className="nav-caption">WORKSPACE</div>
         <nav className="side-nav">
@@ -40,7 +40,7 @@ export function Shell({ children }: { children: ReactNode }) {
         <div className="sidebar-bottom">
           <div className="local-card"><div className="local-card-icon"><Gauge size={17} /></div><div><strong>Local workspace</strong><span>File tetap di perangkat ini</span></div></div>
           <div className="sidebar-status"><i className={online ? "status-dot" : "status-dot offline"} />{online ? "Backend terhubung" : "Backend offline"}</div>
-          <div className="sidebar-footer">KLIPNARA <span>V1.1</span></div>
+          <div className="sidebar-footer">KLIPNARA <span>V2.1</span></div>
         </div>
       </aside>
       <div className="main-column">

@@ -1,6 +1,6 @@
 # AI and Transcription Pipeline
 
-This guide covers optional AI Smart Clip code in `media.py`, `analysis.py`, `providers.py`, and `jobs.py`. Quick Clip is separate and does not enter any path in this pipeline. Cloud transcription is planned, not implemented.
+This guide covers AI Smart Clip and AI Mood Quotes. Quick Clip is separate and does not enter either AI path. Cloud transcription is planned, not implemented.
 
 ## Transcription
 
@@ -53,6 +53,18 @@ flowchart TD
 - OpenAI/Gemini jobs require explicit `consent=true`, configured backend key and record `consent_at`. Retry requires fresh consent. Video/audio never sent to AI providers.
 - Gemini 429 stops the job; app does not upgrade billing, automatically retry or switch provider.
 - API keys are backend environment only; settings UI shows whether key exists, never the value.
+
+## Mood Quotes generation
+
+Mood categories, stable slugs, descriptions, subcategories, writing styles, perspectives, length targets, music moods, fonts, and visual templates live in `mood_quotes.py` and are returned by `GET /api/mood-quotes/categories`. No category data is duplicated across UI components.
+
+`POST /api/mood-projects/{id}/generate` supports Gemini (default when `GEMINI_API_KEY` is configured) or OpenAI (`OPENAI_API_KEY`/`OPENAI_MODEL`). If Gemini is absent and OpenAI is configured, new drafts default to OpenAI; this is initial configuration selection, not runtime fallback. Local Ollama is not offered. Every request requires `consent=true`; backend records provider/model, input settings, usage counts when returned, and `consent_at` in `mood_generations`. Keys are never stored in SQLite or returned to the browser. A configured provider is called only when explicitly selected; missing key, timeout, quota/rate limit, or HTTP error returns an error without retry or provider switch.
+
+The request sends mood/category/subcategory, optional custom topic, style, point of view, target duration band, language, and generation instructions. It never sends uploaded/source video, background image/video, music, draft assets, or provider credentials. Prompt treats custom topic as untrusted subject data and asks for five distinct original alternatives, no famous-quote attribution or song lyrics, short visual segments, visual keywords, and a recommended music mood.
+
+Structured response schema in `QUOTE_SCHEMA` requires exactly five objects with title, final text, ordered segments, mood/tone IDs, visual keywords, and one of ten music moods. `validate_quotes()` enforces strict properties, text lengths, exact normalized reconstruction, ordered indices, known IDs, and near-duplicate rejection. Usable provider segments feed Sequential Text; otherwise `mood_text.py` performs local deterministic sentence/clause splitting and word-weighted timing. Short opening clauses (for example “Terkadang,”) merge into following phrase, and split candidates avoid leading/trailing conjunctions. Manual segments remain untouched unless user invokes confirmed **Segmentasi ulang**. Extremely short duration can still make readable segmentation impossible; editor warns about reading time and long segments rather than rewriting quote text. Editing, timing, reset, preview, visual recommendation/preset selection, and render never call AI. `mood_visuals.py` maps stable mood/category IDs to recommended visual styles deterministically; no provider call or automatic preset application occurs. Music mood remains recommendation, not asset selection. Invalid provider output is not persisted or retried automatically.
+
+Each successful batch is appended to `mood_generations`; current results point to a generation ID. `mood_favorites` stores quote snapshots independently, so regenerate cannot erase saved favorites/history. Editing/selecting a quote writes the draft; editor, preview, and FFmpeg render do not call AI again. Mood quote generation is request-scoped rather than a worker job; FFmpeg render is queued in the shared local FIFO worker.
 
 ## Recorded benchmark evidence
 

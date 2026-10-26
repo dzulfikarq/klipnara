@@ -1,14 +1,14 @@
 # Klipnara
 
-**Local-first Windows video clipper and YouTube Shorts publisher.** Quick Clip is timestamp-based and requires no AI runtime. Optional AI Smart Clip generates transcript-based highlight candidates; both paths support review/edit/render, then optional YouTube publishing for approved MP4s.
+**Klipnara Studio is a local-first Windows video creator.** Create timestamp-based Quick Clips, optional AI Smart Clips, or AI Mood Quotes videos with original text, uploaded/Library backgrounds, music, and animated typography. Clip outputs use existing review and YouTube publishing workflow; Mood Quotes supports draft, review, and download.
 
-Klipnara keeps media, SQLite state, Whisper/Ollama processing, and YouTube OAuth tokens on the local Windows user profile. Cloud highlight providers are optional and require per-job consent; only transcript-based prompt data is sent, never source video/audio.
+Klipnara keeps media, SQLite state, Whisper/Ollama processing, and YouTube OAuth tokens on the local Windows user profile. Cloud AI requires explicit request consent: AI Smart Clip sends transcript prompts; Mood Quotes sends selected text settings. Neither sends video/audio assets to AI providers.
 
 ## Quick start
 
-Requirements: Windows 10/11, Python 3.10+, Node.js 20.9+, FFmpeg/ffprobe. Whisper/model and Ollama/model are optional AI Smart Clip runtimes; OpenAI/Gemini can replace Ollama for highlight analysis with user consent. YouTube OAuth is optional.
+Requirements: Windows 10/11, Python 3.10+, Node.js 20.9+, FFmpeg/ffprobe. Whisper/model and Ollama/model are optional AI Smart Clip runtimes. Mood Quotes generation needs a configured Gemini or OpenAI backend key and explicit consent per request; rendering itself needs no AI runtime. YouTube OAuth is optional for approved clip outputs.
 
-1. Follow [Getting Started](docs/getting-started.md). FFmpeg/ffprobe required; Whisper/Ollama setup is optional for AI Smart Clip.
+1. Follow [Getting Started](docs/getting-started.md). FFmpeg/ffprobe required; Whisper/Ollama setup is optional for AI Smart Clip. Configure `GEMINI_API_KEY` or `OPENAI_API_KEY` for Mood Quotes generation.
 2. Prepare backend environment from repository root:
 
    ```powershell
@@ -42,12 +42,15 @@ Requirements: Windows 10/11, Python 3.10+, Node.js 20.9+, FFmpeg/ffprobe. Whispe
 - MP4/MOV upload and direct public HTTPS media-file import with ffprobe validation and DNS/IP protections.
 - Quick Clip from user-selected timestamps, including sources without audio; no Whisper, Ollama, or cloud calls.
 - Optional AI Smart Clip with local whisper.cpp/Ollama or OpenAI/Gemini highlight analysis using explicit consent.
+- AI Mood Quotes: 8 configurable mood groups, 5 schema-validated alternatives per cloud request, favorites/history, resumable local drafts, legacy Single Text and Sequential Text, semantic local segmentation, and editable timed segments.
+- Mood Quotes: 10 Smart Cinematic Presets, deterministic mood recommendations, adaptive typography, slow zoom/pan/Ken Burns, color grading, vignette, grain, and gradient/dark overlays. Presets preserve quote, manual timing, selected media background, and music; solid/gradient palettes follow preset.
+- Mood Quotes Live/Full Preview and the existing FFmpeg renderer share saved settings. Render jobs retain cancel/retry/progress, audio signal checks, 9:16 H.264/AAC MP4, review fingerprint, Clip Library listing, and download.
 - Token-bounded transcript chunking, SQLite chunk checkpoints, candidate validation/deduplication and global ranking.
 - Portrait FFmpeg H.264/AAC render, trim, center/manual crop and editable ASS subtitles.
 - Separate clip review/render states with approval bound to final MP4 SHA-256.
 - YouTube V1.1 Connected Accounts and Publishing History; OAuth, approval-gated resumable upload and processing confirmation.
 
-**Not implemented:** Cloud Transcription, scheduled posting, mobile app, cloud hosting, multi-user SaaS or other social-platform publishing. See [Roadmap](docs/roadmap.md).
+**Not implemented:** YouTube URL-based Clip import, Mood Quotes YouTube publishing adapter, Cloud Transcription, scheduled posting, mobile app, cloud hosting, multi-user SaaS or other social-platform publishing. Mood Quotes is not inserted into the source-bound `clips` table; it has project/render tables and an independent review fingerprint. See [Roadmap](docs/roadmap.md).
 
 YouTube live credentials are not configured in this checkout; automated publishing tests mock Google HTTP requests. No real YouTube upload/video ID has been verified. Setup steps are in [YouTube Shorts Publishing](docs/youtube-shorts-publishing.md).
 
@@ -73,6 +76,7 @@ From `backend` after `pip install -r requirements-dev.txt`:
 .venv\Scripts\python.exe tests\test_core.py
 .venv\Scripts\python.exe tests\test_api.py
 .venv\Scripts\python.exe tests\test_quick_clip.py
+.venv\Scripts\python.exe tests\test_mood_quotes.py
 .venv\Scripts\python.exe tests\test_youtube.py
 .venv\Scripts\python.exe -m compileall -q clipper tests
 ```
@@ -94,3 +98,9 @@ Optional real-media Quick Clip check with isolated DB/output roots (defaults to 
 ```
 
 Quick Clip E2E passed on the audited i3-9100F/RX 570 machine for audio and synthetic no-audio sources. Recorded device, transcription, chunking, render, and Quick Clip metrics with limits are in the AI, Video Processing, and Testing documents; single-run measurements are not guarantees.
+
+Optional synthetic Mood Quotes render E2E (no AI/network/user media; verifies video/image/solid/gradient backgrounds, looping/mixed audio and silent AAC, Unicode text, animation, codec, duration, and progress):
+
+```powershell
+.venv\Scripts\python.exe tests\run_mood_render_e2e.py
+```

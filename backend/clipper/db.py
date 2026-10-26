@@ -1,8 +1,9 @@
 import json
 import sqlite3
 from contextlib import contextmanager
+from pathlib import Path
 
-from .config import CLIP_DIR, DATA_DIR, DB_PATH, SOURCE_DIR, WORK_DIR
+from .config import CLIP_DIR, DATA_DIR, DB_PATH, MOOD_DIR, SOURCE_DIR, WORK_DIR
 
 
 @contextmanager
@@ -18,7 +19,7 @@ def connect():
 
 
 def init_db():
-    for directory in (DATA_DIR, SOURCE_DIR, WORK_DIR, CLIP_DIR):
+    for directory in (DATA_DIR, SOURCE_DIR, WORK_DIR, CLIP_DIR, MOOD_DIR):
         directory.mkdir(parents=True, exist_ok=True)
     with connect() as conn:
         conn.executescript(
@@ -90,6 +91,52 @@ def init_db():
             CREATE UNIQUE INDEX IF NOT EXISTS youtube_publications_no_duplicate
                 ON youtube_publications(account_id,rendered_sha256)
                 WHERE status IN ('pending','uploading','processing','published');
+            CREATE TABLE IF NOT EXISTS mood_projects (
+                id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT 'Mood Quotes',
+                category_id TEXT, subcategory_id TEXT, custom_topic TEXT NOT NULL DEFAULT '',
+                tone TEXT NOT NULL DEFAULT 'natural', perspective TEXT NOT NULL DEFAULT 'netral',
+                length TEXT NOT NULL DEFAULT 'short', language TEXT NOT NULL DEFAULT 'indonesia',
+                provider TEXT NOT NULL DEFAULT 'gemini',
+                selected_quote_json TEXT, composition_json TEXT NOT NULL,
+                current_generation_id TEXT, current_render_id TEXT,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS mood_generations (
+                id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES mood_projects(id) ON DELETE CASCADE,
+                provider TEXT NOT NULL, model TEXT NOT NULL, request_json TEXT NOT NULL, quotes_json TEXT NOT NULL,
+                input_tokens INTEGER, output_tokens INTEGER, created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS mood_generations_project ON mood_generations(project_id,created_at DESC);
+            CREATE TABLE IF NOT EXISTS mood_favorites (
+                id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES mood_projects(id) ON DELETE CASCADE,
+                generation_id TEXT REFERENCES mood_generations(id) ON DELETE SET NULL,
+                quote_json TEXT NOT NULL, created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS mood_favorites_project ON mood_favorites(project_id,created_at DESC);
+            CREATE TABLE IF NOT EXISTS mood_assets (
+                id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES mood_projects(id) ON DELETE CASCADE,
+                source_id TEXT REFERENCES sources(id) ON DELETE RESTRICT,
+                kind TEXT NOT NULL CHECK(kind IN ('background_image','background_video','music')),
+                name TEXT NOT NULL, path TEXT NOT NULL, mime_type TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL, duration REAL, width INTEGER, height INTEGER,
+                has_audio INTEGER NOT NULL DEFAULT 0, sha256 TEXT NOT NULL, created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS mood_assets_project ON mood_assets(project_id,created_at DESC);
+            CREATE TABLE IF NOT EXISTS mood_jobs (
+                id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES mood_projects(id) ON DELETE CASCADE,
+                render_id TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'mood_render',
+                status TEXT NOT NULL, phase TEXT NOT NULL, progress REAL, message TEXT,
+                options_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS mood_jobs_status_created ON mood_jobs(status,created_at);
+            CREATE TABLE IF NOT EXISTS mood_renders (
+                id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES mood_projects(id) ON DELETE CASCADE,
+                job_id TEXT NOT NULL REFERENCES mood_jobs(id) ON DELETE CASCADE,
+                path TEXT, status TEXT NOT NULL, review_status TEXT NOT NULL DEFAULT 'needs_review',
+                reviewed_render_sha256 TEXT, composition_json TEXT NOT NULL,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS mood_renders_project ON mood_renders(project_id,created_at DESC);
             """
         )
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(sources)")}
@@ -120,6 +167,26 @@ def init_db():
             "UPDATE youtube_publications SET status='failed',last_error='Worker stopped before upload began. Retry is safe.',updated_at=CURRENT_TIMESTAMP "
             "WHERE status='pending' AND job_id IN (SELECT id FROM jobs WHERE kind='youtube_upload' AND status='failed')"
         )
+        interrupted_mood_renders = [row["id"] for row in conn.execute(
+            "SELECT r.id FROM mood_renders r JOIN mood_jobs j ON j.id=r.job_id "
+            "WHERE j.status IN ('preparing','rendering') AND r.path IS NULL"
+        ).fetchall()]
+        conn.execute(
+            "UPDATE mood_jobs SET status='completed',phase='completed',progress=1,message='Render selesai sebelum worker berhenti.',updated_at=CURRENT_TIMESTAMP "
+            "WHERE status IN ('preparing','rendering') AND render_id IN (SELECT id FROM mood_renders WHERE status='completed' AND path IS NOT NULL)"
+        )
+        conn.execute(
+            "UPDATE mood_jobs SET status='failed',phase='interrupted',progress=NULL,message='Worker berhenti saat render. Retry untuk melanjutkan draft.',updated_at=CURRENT_TIMESTAMP "
+            "WHERE status IN ('preparing','rendering')"
+        )
+        conn.execute(
+            "UPDATE mood_renders SET status='failed',updated_at=CURRENT_TIMESTAMP WHERE status IN ('queued','rendering') "
+            "AND job_id IN (SELECT id FROM mood_jobs WHERE status='failed')"
+        )
+    for render_id in interrupted_mood_renders:
+        (CLIP_DIR / f"mood-{render_id}.mp4").unlink(missing_ok=True)
+        for suffix in (".ass", ".ppm", ".log"):
+            (WORK_DIR / f"mood-{render_id}{suffix}").unlink(missing_ok=True)
 
 
 def unpack(row, json_fields=()):

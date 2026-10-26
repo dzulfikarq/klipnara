@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { AlertCircle, ArrowLeft, ArrowRight, Check, CheckCircle2, ChevronDown, Clock3, Cloud, Cpu, Info, LoaderCircle, LockKeyhole, MonitorPlay, Music2, Scissors, Sparkles, Upload, Video, X } from "lucide-react";
+import { AlertCircle, ArrowLeft, ArrowRight, Check, CheckCircle2, ChevronDown, Clock3, Cloud, Cpu, Heart, Info, LoaderCircle, LockKeyhole, MonitorPlay, Music2, Scissors, Sparkles, Upload, Video, X, Youtube } from "lucide-react";
 import { ChangeEvent, DragEvent, useEffect, useRef, useState } from "react";
 import { API, formatBytes, formatDuration, request } from "@/lib/api";
 
@@ -39,6 +39,7 @@ export default function CreatePage() {
   const previewVideo = useRef<HTMLVideoElement>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [workflow, setWorkflow] = useState<"quick" | "ai">("quick");
+  const [entrySelected, setEntrySelected] = useState(false);
   const [sourceMode, setSourceMode] = useState<"upload" | "url" | "library">("upload");
   const [file, setFile] = useState<File | null>(null);
   const [url, setUrl] = useState("");
@@ -61,7 +62,11 @@ export default function CreatePage() {
     if (workflow === "ai") request<Settings>("/settings").then(setSettings).catch((reason) => setError(reason.message));
   }, [workflow]);
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
     const id = new URLSearchParams(window.location.search).get("source");
+    const mode = params.get("mode");
+    if (mode === "quick" || mode === "ai") { setWorkflow(mode); setEntrySelected(true); }
+    else if (id) setEntrySelected(true);
     if (id) request<{ source: Source }>(`/sources/${id}`).then((data) => setSource(data.source)).catch((reason) => setError(reason.message));
   }, []);
   useEffect(() => {
@@ -162,9 +167,24 @@ export default function CreatePage() {
   const load = loadScore >= 4 ? "Berat" : loadScore >= 2 ? "Sedang" : "Relatif ringan";
   const running = Boolean(job && ["queued", "preparing", "transcribing", "analyzing", "rendering"].includes(job.status));
   const parsedStart = parseTimestamp(startTimestamp), parsedEnd = parseTimestamp(endTimestamp);
+  const openClipMode = (mode: "quick" | "ai") => {
+    setWorkflow(mode);
+    setEntrySelected(true);
+    router.replace(`/create?mode=${mode}`, { scroll: false });
+  };
+
+  if (!entrySelected) return <>
+    <div className="page-intro"><div className="eyebrow">KLIPNARA STUDIO 2.1</div><h1>Buat Video</h1><p>Pilih alur video yang ingin kamu buat. File tetap diproses secara lokal.</p></div>
+    <section className="mode-card-grid" aria-label="Pilih mode pembuatan video">
+      <button type="button" className="mode-card" onClick={() => openClipMode("quick")}><span className="mode-card-icon"><Scissors size={20}/></span><span className="mode-card-copy"><strong>Quick Clip</strong><small>Potong video sendiri dengan timestamp. Tanpa AI.</small><em>Siap digunakan</em></span><ArrowRight size={17}/></button>
+      <button type="button" className="mode-card" onClick={() => openClipMode("ai")}><span className="mode-card-icon"><Sparkles size={20}/></span><span className="mode-card-copy"><strong>AI Smart Clip</strong><small>Temukan highlight dari video dengan transkripsi dan AI.</small><em>Perlu runtime AI atau provider cloud</em></span><ArrowRight size={17}/></button>
+      <Link href="/mood" className="mode-card mode-card-featured"><span className="mode-card-icon"><Heart size={20}/></span><span className="mode-card-copy"><strong>AI Mood Quotes</strong><small>Buat quote dan video aesthetic dengan background, musik, dan tipografi.</small><em>Workspace kreator</em></span><ArrowRight size={17}/></Link>
+      <article className="mode-card mode-card-disabled" aria-disabled="true"><span className="mode-card-icon"><Youtube size={20}/></span><span className="mode-card-copy"><strong>YouTube Clip</strong><small>Impor berdasarkan URL YouTube belum tersedia.</small><em>Segera Hadir</em></span></article>
+    </section>
+  </>;
 
   return <>
-    <div className="page-intro"><Link href="/" className="back-link"><ArrowLeft size={14}/> Workspace</Link><div className="eyebrow">VIDEO CLIPPER</div><h1>{workflow === "quick" ? "Quick Clip" : "AI Smart Clip"}</h1><p>{workflow === "quick" ? "Masukkan timestamp untuk memotong video langsung tanpa Whisper, Ollama, atau Cloud AI." : "Generate kandidat highlight dengan transkripsi dan AI; mode ini tetap opsional."}</p></div>
+    <div className="page-intro"><button type="button" className="back-link mode-back" onClick={() => { setEntrySelected(false); router.replace("/create", { scroll: false }); }}><ArrowLeft size={14}/> Semua mode</button><div className="eyebrow">VIDEO CLIPPER</div><h1>{workflow === "quick" ? "Quick Clip" : "AI Smart Clip"}</h1><p>{workflow === "quick" ? "Masukkan timestamp untuk memotong video langsung tanpa Whisper, Ollama, atau Cloud AI." : "Generate kandidat highlight dengan transkripsi dan AI; mode ini tetap opsional."}</p></div>
     <div className="workflow-tabs" role="tablist" aria-label="Mode pembuatan klip">
       <button role="tab" aria-selected={workflow === "quick"} className={workflow === "quick" ? "selected" : ""} disabled={busy || running} onClick={() => { setWorkflow("quick"); setError(""); }}><Scissors size={15}/> Quick Clip <span>DEFAULT</span></button>
       <button role="tab" aria-selected={workflow === "ai"} className={workflow === "ai" ? "selected" : ""} disabled={busy || running} onClick={() => { setWorkflow("ai"); setQuickClipId(""); setError(""); }}><Sparkles size={15}/> AI Smart Clip <small>Optional</small></button>

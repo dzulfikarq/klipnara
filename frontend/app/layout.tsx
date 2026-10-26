@@ -3,8 +3,8 @@ import { Shell } from "@/components/shell";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Klipnara — AI Video Clipper & Publisher",
-  description: "Dari Video Panjang, Jadi Konten Menarik.",
+  title: "Klipnara Studio — AI Video Creator",
+  description: "Buat Quick Clip, AI Smart Clip, dan AI Mood Quotes secara lokal.",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

@@ -19,21 +19,23 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
-from .config import CLIP_DIR, DATA_DIR, LEGACY_CLIP_DIR, LEGACY_SOURCE_DIR, MAX_UPLOAD_BYTES, MIN_FREE_BYTES, SOURCE_DIR, WORK_DIR
+from .config import CLIP_DIR, DATA_DIR, LEGACY_CLIP_DIR, LEGACY_SOURCE_DIR, MAX_UPLOAD_BYTES, MIN_FREE_BYTES, MOOD_DIR, SOURCE_DIR, WORK_DIR
 from .db import connect, init_db, unpack
 from .jobs import create_job, now, runner
 from .media import MediaError, download_url, probe, save_upload, transcript_cache_matches
 from .providers import ProviderError, check_local
 from . import youtube
+from .mood_studio import router as mood_studio_router
 
 
-app = FastAPI(title="Klipnara", version="1.1.0", docs_url="/api/docs")
+app = FastAPI(title="Klipnara Studio", version="2.1.0", docs_url="/api/docs")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
     allow_methods=["GET", "POST", "PATCH", "DELETE"],
     allow_headers=["Content-Type"],
 )
+app.include_router(mood_studio_router)
 
 
 class UrlSource(BaseModel):
@@ -116,7 +118,7 @@ def startup():
 
 
 def _require_storage(directory=DATA_DIR):
-    if min(shutil.disk_usage(path).free for path in {DATA_DIR, WORK_DIR, directory}) < MIN_FREE_BYTES:
+    if min(shutil.disk_usage(path).free for path in {DATA_DIR, WORK_DIR, MOOD_DIR, directory}) < MIN_FREE_BYTES:
         raise HTTPException(507, "Low disk space. Keep at least 1 GiB free for temporary processing files.")
 
 
@@ -382,6 +384,8 @@ def delete_source(source_id: str):
     with connect() as conn:
         if conn.execute("SELECT 1 FROM jobs WHERE source_id=? AND status IN ('queued','preparing','transcribing','analyzing','rendering')", (source_id,)).fetchone():
             raise HTTPException(409, "Cancel active jobs before deleting this source.")
+        if conn.execute("SELECT 1 FROM mood_assets WHERE source_id=? LIMIT 1", (source_id,)).fetchone():
+            raise HTTPException(409, "Lepas video dari Mood Quotes draft sebelum menghapus source ini.")
         clips = conn.execute("SELECT rendered_path FROM clips WHERE source_id=?", (source_id,)).fetchall()
         row = conn.execute("SELECT path FROM sources WHERE id=?", (source_id,)).fetchone()
         if row is None:
@@ -664,13 +668,21 @@ def delete_clip(clip_id: str):
 @app.get("/api/jobs")
 def list_jobs():
     with connect() as conn:
-        return [
+        jobs = [
             dict(row)
             for row in conn.execute(
                 "SELECT j.id,j.source_id,j.clip_id,j.kind,j.status,j.phase,j.progress,j.message,j.created_at,j.updated_at,s.name AS source_name "
                 "FROM jobs j JOIN sources s ON s.id=j.source_id WHERE j.kind!='youtube_upload' ORDER BY j.created_at DESC LIMIT 30"
             ).fetchall()
         ]
+        mood_jobs = [
+            {**dict(row), "source_id": None, "clip_id": row["render_id"], "source_name": row["title"], "asset_type": "mood_quotes"}
+            for row in conn.execute(
+                "SELECT j.id,j.render_id,j.kind,j.status,j.phase,j.progress,j.message,j.created_at,j.updated_at,p.title "
+                "FROM mood_jobs j JOIN mood_projects p ON p.id=j.project_id ORDER BY j.created_at DESC LIMIT 30"
+            ).fetchall()
+        ]
+    return sorted(jobs + mood_jobs, key=lambda item: item["created_at"], reverse=True)[:30]
 
 
 @app.get("/api/jobs/{job_id}")
@@ -678,7 +690,10 @@ def get_job(job_id: str):
     with connect() as conn:
         row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
         if row is None:
-            raise HTTPException(404, "Job not found.")
+            mood = conn.execute("SELECT id,project_id,render_id,kind,status,phase,progress,message,created_at,updated_at FROM mood_jobs WHERE id=?", (job_id,)).fetchone()
+            if mood is None:
+                raise HTTPException(404, "Job not found.")
+            return dict(mood)
         job = dict(row)
         usage = [dict(item) for item in conn.execute("SELECT provider,model,input_tokens,output_tokens,created_at FROM provider_usage WHERE job_id=?", (job_id,)).fetchall()]
     job.pop("options_json", None)
@@ -725,7 +740,8 @@ def settings():
         "data_dir": str(DATA_DIR),
         "source_dir": str(SOURCE_DIR),
         "clip_dir": str(CLIP_DIR),
-        "free_bytes": min(shutil.disk_usage(path).free for path in {DATA_DIR, WORK_DIR, SOURCE_DIR, CLIP_DIR}),
+        "mood_dir": str(MOOD_DIR),
+        "free_bytes": min(shutil.disk_usage(path).free for path in {DATA_DIR, WORK_DIR, MOOD_DIR, SOURCE_DIR, CLIP_DIR}),
     }
 
 
@@ -810,7 +826,7 @@ def _capabilities():
             vulkan_available = "deviceName" in output
     except (OSError, subprocess.SubprocessError):
         pass
-    free = min(shutil.disk_usage(path).free for path in {DATA_DIR, WORK_DIR, SOURCE_DIR, CLIP_DIR})
+    free = min(shutil.disk_usage(path).free for path in {DATA_DIR, WORK_DIR, MOOD_DIR, SOURCE_DIR, CLIP_DIR})
     return {
         "os": os_name,
         "cpu": cpu,

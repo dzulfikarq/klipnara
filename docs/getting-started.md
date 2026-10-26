@@ -8,6 +8,7 @@ Supported workflow targets Windows 10/11, one local user, loopback-only backend,
 - FFmpeg and ffprobe. Build must include libx264 and libass; audited 1080p path also requires working `h264_amf`.
 - whisper.cpp CLI plus multilingual `small` model recommended for **AI Smart Clip**; `base` is faster and less accurate fallback. Neither is required for Quick Clip.
 - Ollama and `qwen2.5:1.5b` for default local AI Smart Clip highlight selection. Ollama is not required by Quick Clip.
+- Gemini or OpenAI backend API key for AI Mood Quotes **generation**. Mood Quotes FFmpeg rendering does not require either key or a local AI runtime.
 - Google Cloud OAuth web client only if connecting YouTube.
 
 ## Install media runtimes
@@ -46,7 +47,7 @@ winget install --id Ollama.Ollama --exact
 ollama pull qwen2.5:1.5b
 ```
 
-Start Ollama Desktop or run `ollama serve` in another terminal. AI Smart Clip checks local service/model with bounded attempts and fails without cloud fallback. Quick Clip does not check/load the local model.
+Start Ollama Desktop or run `ollama serve` in another terminal. AI Smart Clip checks local service/model with bounded attempts and fails without cloud fallback. Quick Clip and Mood Quotes rendering do not check/load the local model.
 
 ## Prepare backend
 
@@ -74,6 +75,8 @@ Edit `backend/.env` paths if needed. Example media roots can live on another dri
 ```
 
 `--env-file .env` is passed by the root dev runner so Uvicorn reads this file. Process/OS variables take precedence. Never commit actual keys.
+
+For AI Mood Quotes generation, configure `GEMINI_API_KEY` (default when present) or `OPENAI_API_KEY` in `backend/.env`. If Gemini is absent and OpenAI is configured, new drafts select OpenAI. Configure a provider only if you intend to send quote-generation text to that provider; each request still requires an in-app consent check. No video/image/audio assets or credentials are sent. Missing key/quota does not switch providers. Quote selection/editing, draft reopen, preview, and FFmpeg rendering need no AI call. System fonts are used; Klipnara does not download font files.
 
 ## Run both services from repository root
 
@@ -107,11 +110,11 @@ Preflight reports missing root `concurrently`, `frontend/node_modules/next`, `ba
 
 ## First local workflow
 
-1. Open **Buat Klip AI** and upload MP4/MOV or import direct public HTTPS media URL.
-2. Choose candidate count, target length, style, resolution, crop focus, language, and AI provider. Cloud provider requires per-job consent.
-3. Generate candidates. Local queue reports worker status; completed analysis routes to source candidate review.
-4. Open candidate in editor, adjust trim/crop/subtitles, render final MP4, then approve or request revision.
-5. YouTube setup and verified-account requirements are in [YouTube Shorts Publishing](youtube-shorts-publishing.md).
+1. Open **Buat Video** and choose Quick Clip, AI Smart Clip, or AI Mood Quotes. YouTube Clip URL import is marked Segera Hadir and is not active.
+2. Quick Clip and AI Smart Clip use existing MP4/MOV upload, public HTTPS file import, or Source Library. Cloud AI Smart Clip requires consent.
+3. AI Mood Quotes: choose mood/subcategory/topic/style, select provider, consent for that request, generate five choices, pick/edit one, then customize/render without another AI request.
+4. Mood backgrounds/audio are uploaded locally or a Source Library video is referenced. Use media you have rights to use. Review and download Mood MP4 from Mood workspace or Clip Library; Mood quotes have no YouTube publish adapter yet.
+5. Approved Quick/AI Smart Clips retain existing YouTube publishing workflow. Setup and verified-account requirements are in [YouTube Shorts Publishing](youtube-shorts-publishing.md).
 
 ## Environment variable reference
 
@@ -134,3 +137,5 @@ Preflight reports missing root `concurrently`, `frontend/node_modules/next`, `ba
 | `CLINFO_PATH`, `VULKANINFO_PATH` | Optional diagnostics executable overrides |
 
 `MIN_FREE_BYTES` is a code constant of 1 GiB rather than an environment option. See [API and Database](api-and-database.md) for storage locations and schemas.
+
+Mood asset upload caps are 25 MiB per still image, 512 MiB per background video, and 100 MiB per audio file. No Pexels/Pixabay, music, or font downloader is included. Mood render requires FFmpeg with `libass`, `libx264`, AAC encoding; 1080p uses `h264_amf` when present and falls back to CPU x264. See [Video Processing](video-processing.md) for details and measured synthetic E2E results.

@@ -12,6 +12,25 @@ Roadmap captures latest product direction, not a claim that planned code already
 - Keep FFmpeg as video processing engine.
 - Preserve and maintain existing YouTube V1.1 publishing flow.
 
+## V2.1 Studio phase status
+
+| Phase | State | Scope/status |
+|---|---|---|
+| Multi-mode Create Video | **Implemented** | Quick Clip and AI Smart Clip retain existing workflows; AI Mood Quotes opens a dedicated workspace; YouTube Clip URL import is accurately disabled as Segera Hadir. |
+| Mood categories and quote generation | **Implemented; live provider not verified in this checkout** | Eight data-driven groups, 61 subcategories, nine writing styles, POV/length/language selection, Gemini default/OpenAI alternative, per-request consent, strict five-quote validation, favorites, history and regenerate preservation. |
+| Drafts and editor | **Implemented; runtime recheck pending** | Existing additive tables retained; mode/segments live in `composition_json` without migration. New drafts default to Sequential Text; old drafts stay Single Text. Autosaved editor adds local segment timing/animation, responsive preview, visual/audio controls, and no-AI edits/render. |
+| Media composition and FFmpeg | **Implemented; expanded synthetic E2E pending** | Image/video/solid/gradient, segmented ASS text, music trim/resampling/mix/fades/loop, selected-audio signal and MP4 stream/duration/resolution checks, 720p H.264/AAC default and optional 1080p, progress/cancel/retry, review SHA-256/download. Existing 24 Oct results cover earlier cases; new scenarios were not run in this checkout and synthetic media cannot certify arbitrary user footage. |
+| Library/review/publishing | **Implemented except Mood YouTube adapter** | Drafts and Mood outputs appear in Clip Library; review fingerprint/download supported. Mood projects are not coerced into `clips` and do not expose a Publish button. Existing Quick/AI Smart Clip YouTube workflow remains unchanged. |
+
+## V2.3 Mood Quotes cinematic phase
+
+| Phase | State | Scope/status |
+|---|---|---|
+| Smart Visual Presets | **Implemented in source; validation pending** | Ten typed/versioned data-driven styles, mood recommendations, visual-only application, one-step undo/reset, and no automatic asset/music selection. |
+| Motion/color/atmosphere | **Implemented in source; FFmpeg/browser validation pending** | Existing Mood renderer adds bounded zoom/pan/Ken Burns, colorbalance/eq, vignette, grain, dark/gradient overlays; browser previews simulate effects from shared draft settings. No glow or new rendering pipeline. |
+| Indonesian semantic segmentation | **Implemented in source; tests not run** | Deterministic clause merge/split rules avoid hanging openers/connectors; manual segments require explicit confirmed re-segmentation. Old Single Text drafts remain supported. |
+| V2.3 QA | **Pending user runtime check** | Regression and synthetic-render test code added/updated but not executed. Compare Live Preview, Preview Penuh, and MP4; no build/server/browser/FFmpeg run was performed for this update. |
+
 ## V2.0 phase status
 
 | Phase | State | Scope/status |
@@ -26,6 +45,7 @@ Roadmap captures latest product direction, not a claim that planned code already
 
 | Area | Current source status | Direction |
 |---|---|---|
+| AI Mood Quotes | **V2.3 source implementation; runtime/tests pending** for consented generation, deterministic segmentation, cinematic presets/effects, local FFmpeg composition. No V2.3 test/build/live AI/browser/FFmpeg run was performed. | Follow V2.3 manual QA; measure effects on target hardware and validate preview/render parity before calling verified. |
 | Quick Clip by timestamp | **Implemented.** Current Create default; accepts `MM:SS`/`HH:MM:SS`, creates clip/job without transcript/candidate/AI, renders selected interval, supports sources without audio. | Keep primary, lightweight path; Fase 2 may optimize FFmpeg latency later. |
 | Whisper transcription | **Implemented; used for fresh sources/cache misses** in AI Smart Clip. Local whisper.cpp, `small` recommended, `base` fallback, language auto/Indonesian/English. | Optional for the product's primary Quick Clip flow; retain for AI Smart Clip. |
 | Ollama highlight analysis | **Implemented, default** local provider for AI Smart Clip; OpenAI/Gemini can replace it with explicit consent. | Optional for the product's primary Quick Clip flow. |
@@ -37,12 +57,12 @@ Roadmap captures latest product direction, not a claim that planned code already
 
 ## Suggested next sequence
 
-1. Optimize selected-interval FFmpeg processing while retaining current output safety and measuring on target i3/RX 570 hardware.
-2. Continue Fase 3 editor usability for Quick Clip without creating a second editor.
-3. Keep Whisper/Ollama optional outside AI Smart Clip; do not add Cloud Transcription until specifically scoped and consented.
-4. Configure a real personal YouTube OAuth client, complete one Private upload and verify channel/video ID/privacy/processing in YouTube Studio before extending publishing scope.
-5. Consider scheduler or more channels only after direct upload is live-verified and requested.
+1. Run V2.3 Mood Quotes manual QA on target hardware; compare Live Preview, Preview Penuh, and MP4 across presets/effects, then execute automated tests only with user authorization. Validate live Gemini/OpenAI separately with explicit consent and quota checks.
+2. Decide whether to add a source-less YouTube publishing adapter for Mood render records without changing existing clip approval/upload invariants.
+3. Keep YouTube Clip URL import disabled until a rights-aware and secure supported ingest approach is scoped; do not add an arbitrary downloader.
+4. Configure a real personal YouTube OAuth client, complete one Private upload, and verify channel/video ID/privacy/processing in YouTube Studio for existing clip outputs.
+5. Keep Cloud Transcription, scheduler, mobile, hosted SaaS, and other social platforms planned only until separately scoped.
 
-No estimates or release dates are assigned. Quick Clip Fase 1 is implemented; Fase 2/3/4 expansions and Cloud Transcription remain planned, not implemented.
+No estimates or release dates are assigned. Quick Clip V2.0 Fase 1 and Mood Quotes V2.1 creation/render/review/download phases are implemented. Mood Quotes YouTube publishing, YouTube Clip URL import, Cloud Transcription, and other listed expansions remain not implemented.
 
 Current technical structure: [Architecture](architecture.md). Current implemented workflows: [Features and Workflows](features-and-workflows.md).

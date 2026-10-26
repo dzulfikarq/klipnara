@@ -32,7 +32,7 @@ router = APIRouter(prefix="/api")
 DEFAULT_COMPOSITION = {
     "resolution": "720", "fps": 30, "duration": 10,
     "background": {"kind": "gradient", "asset_id": None, "color": "#1b332c", "color2": "#568b70", "video_start": 0, "loop": True, "mute_audio": True, "audio_volume": 0.2},
-    "music": {"asset_id": None, "trim_start": 0, "trim_end": 30, "volume": 0.25, "fade_in": 1, "fade_out": 1, "loop": True},
+    "music": {"asset_id": None, "offset": 0, "trim_start": 0, "trim_end": 30, "volume": 0.25, "fade_in": 1, "fade_out": 1, "loop": True, "muted": False},
     "text": {"text": "", "font": "Georgia", "font_size": 50, "color": "#ffffff", "alignment": "center", "x": 50, "y": 52,
              "font_weight": 600, "line_spacing": 1.25, "shadow": True, "outline": False, "opacity": 100, "start": 0, "end": 10,
              "animation_in": "fade", "animation_out": "fade", "animation_duration": 0.8, "gradient_opacity": 18, "auto_contrast": False},
@@ -65,12 +65,14 @@ class MoodBackground(StrictModel):
 
 class MoodMusic(StrictModel):
     asset_id: str | None = Field(default=None, max_length=64)
+    offset: float = Field(default=0, ge=0, le=40)
     trim_start: float = Field(default=0, ge=0, le=14400)
     trim_end: float = Field(default=30, gt=0, le=14400)
     volume: float = Field(default=0.25, ge=0, le=1)
     fade_in: float = Field(default=1, ge=0, le=40)
     fade_out: float = Field(default=1, ge=0, le=40)
     loop: bool = True
+    muted: bool = False
 
 
 class MoodText(StrictModel):
@@ -134,8 +136,12 @@ class MoodComposition(StrictModel):
     def valid_timing(self):
         if self.text_mode == "single" and (self.text.start >= self.text.end or self.text.end > self.duration):
             raise ValueError("Waktu tampil teks harus berada di dalam durasi video.")
+        if self.music.offset >= self.duration:
+            raise ValueError("Posisi mulai musik harus berada di dalam durasi video.")
         if self.music.trim_end <= self.music.trim_start:
             raise ValueError("Trim akhir musik harus setelah trim awal.")
+        if self.music.asset_id and self.music.fade_in + self.music.fade_out > self.duration - self.music.offset + 0.001:
+            raise ValueError("Total fade musik melebihi durasi musik yang tersedia di komposisi.")
         if self.text_mode == "sequential":
             if len({segment.id for segment in self.segments}) != len(self.segments):
                 raise ValueError("ID segmen sequential harus unik.")
@@ -376,6 +382,23 @@ def _check_project_assets(project_id, composition):
     if background["kind"] in {"solid", "gradient"}:
         background["asset_id"] = None
     return assets
+
+
+def _validate_music_timing(composition, asset):
+    music = composition["music"]
+    if not music.get("asset_id"):
+        return
+    offset = float(music.get("offset", 0))
+    available = max(0.0, composition["duration"] - offset)
+    source_span = max(0.0, music["trim_end"] - music["trim_start"])
+    source_remaining = max(0.0, asset["duration"] - music["trim_start"])
+    if min(source_span, source_remaining) < 0.05:
+        raise HTTPException(422, "Trim musik harus menyisakan sedikitnya 0,05 detik audio.")
+    play_duration = available if music["loop"] else min(available, source_span, source_remaining)
+    if play_duration < 0.05:
+        raise HTTPException(422, "Posisi mulai/trim musik tidak menyisakan audio di durasi komposisi.")
+    if music["fade_in"] + music["fade_out"] > play_duration + 0.001:
+        raise HTTPException(422, "Gabungan fade-in dan fade-out melebihi durasi musik yang terdengar.")
 
 
 def _probe_asset(path, kind):
@@ -772,6 +795,7 @@ def queue_mood_render(project_id: str, composition: MoodComposition):
             comp["music"]["trim_end"] = min(comp["music"]["trim_end"], music_asset["duration"])
             if comp["music"]["trim_end"] <= comp["music"]["trim_start"]:
                 raise HTTPException(422, "Trim musik tidak menyisakan rentang audio yang valid.")
+            _validate_music_timing(comp, music_asset)
         bg_asset = assets.get(comp["background"].get("asset_id"))
         if bg_asset and bg_asset["kind"] == "background_video" and comp["background"]["video_start"] >= bg_asset["duration"]:
             raise HTTPException(422, "Segmen background video berada di luar durasi file.")
@@ -831,7 +855,12 @@ def retry_mood_job(job_id: str):
     if old["status"] not in {"failed", "cancelled"}:
         raise HTTPException(409, "Hanya render gagal/dibatalkan yang bisa di-retry.")
     options = json.loads(old["options_json"])
-    _check_project_assets(old["project_id"], options["composition"])
+    options["composition"].setdefault("music", {}).setdefault("offset", 0)
+    options["composition"].setdefault("music", {}).setdefault("muted", False)
+    retry_assets = _check_project_assets(old["project_id"], options["composition"])
+    music = options["composition"]["music"]
+    if music.get("asset_id"):
+        _validate_music_timing(options["composition"], retry_assets[music["asset_id"]])
     timestamp, new_job, render_id = now(), uuid.uuid4().hex, uuid.uuid4().hex
     with connect() as conn:
         conn.execute("BEGIN IMMEDIATE")

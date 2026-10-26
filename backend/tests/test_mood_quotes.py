@@ -19,6 +19,7 @@ from clipper.db import connect, init_db
 from clipper.jobs import now, runner
 from clipper.main import app
 from clipper.media import MediaError
+from clipper.mood_studio import MoodComposition, _validate_music_timing
 from clipper.providers import ProviderError
 from clipper.mood_quotes import validate_quotes
 from clipper.mood_text import automatic_segments, normalized_words, sequence_warnings, word_count
@@ -82,6 +83,14 @@ def run():
                 segments = automatic_segments(indonesian, 10)
                 assert normalized_words(" ".join(item["text"] for item in segments)) == normalized_words(indonesian)
                 assert all(word_count(item["text"]) > 1 for item in segments), [item["text"] for item in segments]
+            complex_indonesian = (
+                "Pada hari yang berat, terkadang kita berhenti sejenak agar pikiran kembali tenang. "
+                "Namun, perjalanan belum selesai karena harapan masih hidup, dan kita dapat melangkah perlahan."
+            )
+            complex_segments = automatic_segments(complex_indonesian, 12)
+            assert normalized_words(" ".join(item["text"] for item in complex_segments)) == normalized_words(complex_indonesian)
+            assert all(word_count(item["text"]) > 1 for item in complex_segments)
+            assert all(not item["text"].casefold().startswith(("agar ", "dan ", "karena ", "sehingga ")) for item in complex_segments)
             terkadang = automatic_segments("Terkadang, kita hanya perlu berhenti sejenak agar hati bisa menyusul pikiran.", 10)
             assert terkadang[0]["text"].casefold().startswith("terkadang, kita")
             preferred_terkadang = automatic_segments(
@@ -89,6 +98,30 @@ def run():
                 preferred=[{"text": "Terkadang,"}, {"text": "kita hanya perlu berhenti sejenak agar hati bisa menyusul pikiran."}],
             )
             assert preferred_terkadang[0]["text"].casefold().startswith("terkadang, kita")
+
+            old_music_shape = MoodComposition.model_validate({"text": {"text": "Old single quote", "start": 0, "end": 10}})
+            assert old_music_shape.music.offset == 0 and old_music_shape.music.muted is False
+            valid_music_timing = {"duration": 10, "music": {
+                "asset_id": "music-1", "offset": 2, "trim_start": 1, "trim_end": 5,
+                "fade_in": 0.5, "fade_out": 0.5, "loop": False,
+            }}
+            _validate_music_timing(valid_music_timing, {"duration": 8})
+            try:
+                _validate_music_timing({**valid_music_timing, "music": {**valid_music_timing["music"], "offset": 9.5}}, {"duration": 8})
+            except Exception as exc:
+                assert "audio" in str(exc).casefold() or "musik" in str(exc).casefold()
+            else:
+                raise AssertionError("Music offset that leaves no audible span was accepted")
+            short_loop = {**valid_music_timing, "music": {
+                **valid_music_timing["music"], "loop": True, "trim_start": 1, "trim_end": 1.02,
+                "fade_in": 0, "fade_out": 0,
+            }}
+            try:
+                _validate_music_timing(short_loop, {"duration": 8})
+            except Exception as exc:
+                assert "0,05" in str(exc)
+            else:
+                raise AssertionError("Too-short looping music source was accepted")
 
             assert [item.id for item in recommend_visual_presets(["sedih"])] == ["sad-night", "rainy-memories", "minimal-aesthetic"]
             manual_composition = {
@@ -141,6 +174,7 @@ def run():
             project_id = created.json()["project"]["id"]
             fresh_composition = created.json()["project"]["composition"]
             assert fresh_composition["text_mode"] == "sequential" and fresh_composition["segments"] == []
+            assert fresh_composition["music"]["offset"] == 0 and fresh_composition["music"]["muted"] is False
             legacy_project = client.post("/api/mood-projects", json={"title": "Legacy draft"}).json()["project"]["id"]
             legacy_composition = dict(fresh_composition)
             legacy_composition.pop("text_mode"); legacy_composition.pop("segments"); legacy_composition.pop("segments_source")
@@ -153,6 +187,7 @@ def run():
             assert legacy_saved.json()["project"]["composition"]["visual"]["schema_version"] == 1
             assert legacy_saved.json()["project"]["composition"]["visual"]["motion"] == "none"
             assert legacy_saved.json()["project"]["composition"]["text"]["font_weight"] == 600
+            assert legacy_saved.json()["project"]["composition"]["music"]["offset"] == 0
             topic_saved = client.patch(f"/api/mood-projects/{project_id}", json={"custom_topic": "Semangat menghadapi interview kerja"})
             assert topic_saved.status_code == 200
             missing_consent = client.post(f"/api/mood-projects/{project_id}/generate", json={"provider": "gemini", "consent": False})
@@ -289,8 +324,17 @@ def run():
 
             composition = saved.json()["project"]["composition"]
             composition["background"].update({"kind": "image", "asset_id": asset["id"]})
+            composition["music"].update({
+                "asset_id": music_asset.json()["id"], "offset": 2, "trim_start": 1, "trim_end": 5,
+                "volume": 0.3, "fade_in": 0.5, "fade_out": 0.5, "loop": False, "muted": False,
+            })
             queued = client.post(f"/api/mood-projects/{project_id}/render", json=composition)
             assert queued.status_code == 200, queued.text
+            with connect() as conn:
+                snapshot = json.loads(conn.execute("SELECT options_json FROM mood_jobs WHERE id=?", (queued.json()["id"],)).fetchone()[0])
+            assert snapshot["composition"]["music"]["offset"] == 2
+            assert snapshot["composition"]["music"]["trim_start"] == 1
+            assert snapshot["composition"]["music"]["muted"] is False
 
             def fake_render(*, render_id, **_kwargs):
                 path = CLIP_DIR / f"mood-{render_id}.mp4"

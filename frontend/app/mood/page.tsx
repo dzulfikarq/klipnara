@@ -2,9 +2,11 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { AlertCircle, ArrowLeft, ArrowRight, Check, CheckCircle2, Clock3, Cloud, Download, Heart, LoaderCircle, LockKeyhole, Music2, Play, Plus, RotateCcw, Save, Sparkles, Trash2, Upload, Video, WandSparkles, X } from "lucide-react";
-import { ChangeEvent, CSSProperties, useEffect, useMemo, useRef, useState } from "react";
+import { AlertCircle, ArrowLeft, ArrowRight, Check, CheckCircle2, Clock3, Cloud, Copy, Download, Heart, LoaderCircle, LockKeyhole, Music2, Pause, Play, Plus, RotateCcw, Save, Scissors, Sparkles, Trash2, Upload, Video, Volume2, VolumeX, WandSparkles, X, ZoomIn, ZoomOut } from "lucide-react";
+import { ChangeEvent, CSSProperties, PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from "react";
 import { API, formatDuration, request } from "@/lib/api";
+import { createSerializedSaveQueue } from "@/lib/mood-draft.mjs";
+import { duplicateSegment as duplicateTimelineSegment, mergeSegment, musicPlaybackSpan, resetSegmentTimings, semanticSegments, snapTimelineTime, splitSegment, timeAtPosition, updateSegmentTiming } from "@/lib/mood-timeline.mjs";
 
 type Option = { id: string; name: string; seconds?: number[] };
 type Category = { id: string; name: string; description: string; subcategories: Option[] };
@@ -20,7 +22,7 @@ type SourceItem = { id: string; name: string; duration: number; width: number; h
 type Composition = {
   resolution: "720" | "1080"; fps: 30; duration: number;
   background: { kind: "solid" | "gradient" | "image" | "video"; asset_id: string | null; color: string; color2: string; video_start: number; loop: boolean; mute_audio: boolean; audio_volume: number };
-  music: { asset_id: string | null; trim_start: number; trim_end: number; volume: number; fade_in: number; fade_out: number; loop: boolean };
+  music: { asset_id: string | null; offset: number; trim_start: number; trim_end: number; volume: number; fade_in: number; fade_out: number; loop: boolean; muted: boolean };
   text: { text: string; font: string; font_size: number; font_weight: number; color: string; alignment: "left" | "center" | "right"; x: number; y: number; line_spacing: number; shadow: boolean; outline: boolean; opacity: number; start: number; end: number; animation_in: string; animation_out: string; animation_duration: number; gradient_opacity: number; auto_contrast: boolean };
   visual: VisualSettings; text_mode: "single" | "sequential"; segments: TextSegment[]; segments_source: "auto" | "manual" | "legacy";
 };
@@ -33,85 +35,26 @@ const emptyDraft: Draft = { title: "Mood Quotes", category_id: "bahagia-positif"
 const emptyComposition: Composition = {
   resolution: "720", fps: 30, duration: 10,
   background: { kind: "gradient", asset_id: null, color: "#1b332c", color2: "#568b70", video_start: 0, loop: true, mute_audio: true, audio_volume: 0.2 },
-  music: { asset_id: null, trim_start: 0, trim_end: 30, volume: 0.25, fade_in: 1, fade_out: 1, loop: true },
+  music: { asset_id: null, offset: 0, trim_start: 0, trim_end: 30, volume: 0.25, fade_in: 1, fade_out: 1, loop: true, muted: false },
   text: { text: "", font: "Georgia", font_size: 50, font_weight: 600, color: "#ffffff", alignment: "center", x: 50, y: 52, line_spacing: 1.25, shadow: true, outline: false, opacity: 100, start: 0, end: 10, animation_in: "fade", animation_out: "fade", animation_duration: 0.8, gradient_opacity: 18, auto_contrast: false },
   visual: { schema_version: 1, preset_id: null, motion: "none", motion_intensity: "subtle", brightness: 0, contrast: 1, saturation: 1, temperature: 0, vignette: 0, grain: 0, dark_overlay: 0, gradient_top: "#26344a", gradient_bottom: "#101820", gradient_overlay_opacity: 0, segment_animation: "fade_up" },
   text_mode: "sequential", segments: [], segments_source: "auto",
 };
 const animationOptions = [{ id: "fade", name: "Fade" }, { id: "slide_up", name: "Slide Up" }, { id: "slide_down", name: "Slide Down" }, { id: "typewriter", name: "Typewriter" }, { id: "zoom", name: "Zoom lembut" }, { id: "none", name: "Tanpa animasi" }];
 const segmentAnimationOptions = [{ id: "fade_in", name: "Fade In" }, { id: "fade_out", name: "Fade Out" }, { id: "fade_up", name: "Fade Up" }, { id: "slide_up", name: "Slide Up" }, { id: "gentle_scale", name: "Gentle Scale" }, { id: "none", name: "Tanpa animasi" }] as const;
-const connectors = new Set(["agar", "although", "and", "after", "before", "because", "but", "dan", "karena", "ketika", "lalu", "meski", "namun", "saat", "sebelum", "setelah", "supaya", "tapi", "then", "while", "yet", "atau", "tetapi", "sehingga", "walaupun"]);
-const discourseOpeners = new Set(["terkadang", "kadang", "sesekali", "namun", "tetapi", "meski", "walau", "walaupun", "karena", "sehingga", "bahkan"]);
-const tokenWord = (token: string) => token.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "").toLocaleLowerCase();
-
-const normalizedWords = (text: string) => (text.match(/[\p{L}\p{N}]+/gu) || []).map((word) => word.toLocaleLowerCase()).join(" ");
 const wordCount = (text: string) => (text.match(/[\p{L}\p{N}]+/gu) || []).length;
 const newSegmentId = () => globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 const segmentAnimationForLegacy = (animation: string): TextSegment["animation"] => animation === "slide_up" ? "slide_up" : animation === "zoom" ? "gentle_scale" : animation === "none" ? "none" : "fade_up";
 
 function makeTimedSegments(text: string, duration: number, animation: TextSegment["animation"] = "fade_up", preferred: Quote["segments"] = []): TextSegment[] {
-  const clean = text.trim();
-  if (!clean) return [];
-  const maxParts = Math.max(1, Math.min(8, Math.floor(duration / 1.4)));
-  const preferredWords = preferred.map((item) => item.text.trim().split(/\s+/u).filter(Boolean));
-  const hasUnsafeBoundary = preferred.length > 1 && wordCount(clean) > 1 && (
-    preferredWords.some((part) => part.length < 2)
-    || preferredWords.slice(1).some((part) => connectors.has(tokenWord(part[0] || "")) || discourseOpeners.has(tokenWord(part[0] || "")))
-    || preferredWords.slice(0, -1).some((part) => connectors.has(tokenWord(part[part.length - 1] || "")) || discourseOpeners.has(tokenWord(part[part.length - 1] || "")))
-  );
-  const partsMatch = preferred.length > 0 && preferred.length <= maxParts && !hasUnsafeBoundary && preferred.every((item) => wordCount(item.text) <= 18) && normalizedWords(preferred.map((item) => item.text).join(" ")) === normalizedWords(clean);
-  let parts = partsMatch ? preferred.map((item) => item.text.trim()) : [];
-  if (!parts.length) {
-    const splitLongPhrase = (phrase: string) => {
-      let tokens = phrase.split(/\s+/u).filter(Boolean);
-      const result: string[] = [];
-      while (tokens.length > 11) {
-        const candidates = Array.from({ length: 9 }, (_, index) => index + 3).filter((boundary) => tokens.length - boundary >= 3 && !connectors.has(tokenWord(tokens[boundary - 1])) && !discourseOpeners.has(tokenWord(tokens[boundary - 1])) && !connectors.has(tokenWord(tokens[boundary])) && !discourseOpeners.has(tokenWord(tokens[boundary])));
-        const punctuation = candidates.filter((boundary) => /[,;:—–]$/u.test(tokens[boundary - 1]));
-        const boundary = (punctuation.length ? punctuation : candidates).sort((a, b) => Math.abs(a - 11) - Math.abs(b - 11))[0] || 11;
-        result.push(tokens.splice(0, boundary).join(" "));
-      }
-      if (tokens.length) result.push(tokens.join(" "));
-      return result;
-    };
-    const sentences = clean.replace(/[\t ]+/g, " ").split(/(?<=[.!?…])\s+|\n+/u).filter(Boolean);
-    for (const sentence of sentences) {
-      const clauses = sentence.split(/(?<=[,;:—–])\s+/u).filter(Boolean);
-      const merged: string[] = [];
-      let pending: string[] = [];
-      for (let clause of clauses) {
-        const opener = tokenWord(clause.split(/\s+/u)[0] || "");
-        if (!merged.length && (wordCount(clause) < 3 || connectors.has(opener) || discourseOpeners.has(opener))) { pending.push(clause); continue; }
-        if (pending.length) { clause = `${pending.join(" ")} ${clause}`; pending = []; }
-        if (wordCount(clause) < 3 && merged.length) merged[merged.length - 1] += ` ${clause}`;
-        else merged.push(clause);
-      }
-      if (pending.length && merged.length) merged[merged.length - 1] += ` ${pending.join(" ")}`;
-      else merged.push(...pending);
-      merged.forEach((clause) => parts.push(...splitLongPhrase(clause)));
-    }
-  }
-  while (parts.length > maxParts) {
-    let smallest = 0;
-    for (let index = 1; index < parts.length - 1; index++) if (wordCount(parts[index]) + wordCount(parts[index + 1]) < wordCount(parts[smallest]) + wordCount(parts[smallest + 1])) smallest = index;
-    parts.splice(smallest, 2, `${parts[smallest]} ${parts[smallest + 1]}`.trim());
-  }
-  const weights = parts.map((part) => Math.max(1, wordCount(part) / 2.8 + Math.min(1, (part.match(/[,;:.!?…]/gu) || []).length * 0.12)));
-  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
-  const available = duration - parts.length * 0.2;
-  let cursor = 0;
-  return parts.map((part, index) => {
-    const start = Number(cursor.toFixed(3));
-    const end = index === parts.length - 1 ? duration : Number((cursor + 0.2 + available * weights[index] / totalWeight).toFixed(3));
-    cursor = end;
-    return { id: newSegmentId(), text: part, start, end, animation, animation_duration: Number(Math.min(0.45, (end - start) / 2).toFixed(3)) };
-  });
+  return semanticSegments(text, duration, animation, preferred);
 }
 
 function normalizeComposition(value: Composition, quote: Quote | null): Composition {
   const raw = value as Composition & { text_mode?: Composition["text_mode"]; segments?: TextSegment[]; text?: Partial<Composition["text"]> };
   const legacy = !raw.text_mode;
   const text = { ...emptyComposition.text, ...raw.text };
+  const music = { ...emptyComposition.music, ...raw.music };
   const visual = { ...emptyComposition.visual, ...raw.visual };
   if (legacy) { text.gradient_opacity = 0; text.auto_contrast = false; }
   if (!raw.visual) visual.segment_animation = segmentAnimationForLegacy(text.animation_in);
@@ -124,7 +67,7 @@ function normalizeComposition(value: Composition, quote: Quote | null): Composit
   } else if (textMode === "sequential" && !segments.length && (quote?.text || text.text)) {
     segments = makeTimedSegments(quote?.text || text.text, duration, visual.segment_animation, quote?.segments || []);
   }
-  return { ...emptyComposition, ...raw, text, visual, duration, text_mode: textMode, segments, segments_source: segmentsSource };
+  return { ...emptyComposition, ...raw, music, text, visual, duration, text_mode: textMode, segments, segments_source: segmentsSource };
 }
 
 function sequenceWarnings(segments: TextSegment[], duration: number): string[] {
@@ -139,8 +82,9 @@ function sequenceWarnings(segments: TextSegment[], duration: number): string[] {
     if (segment.start > previousEnd + 0.05) warnings.push(`Ada jeda sebelum segmen ${index + 1}.`);
     if (segment.start < previousEnd - 0.01) warnings.push(`Segmen ${index + 1} overlap dengan segmen sebelumnya.`);
     if (span > 0 && words / span > 3.2) warnings.push(`Segmen ${index + 1} mungkin terlalu cepat dibaca.`);
+    if (span > 0 && span < 0.5) warnings.push(`Segmen ${index + 1} terlalu singkat untuk dibaca nyaman; gunakan minimal 0,5 dtk.`);
     if (words > 18) warnings.push(`Segmen ${index + 1} panjang; segmentasi ulang untuk mencegah font terlalu kecil.`);
-    if (segment.animation_duration > span) warnings.push(`Durasi animasi segmen ${index + 1} melebihi waktu tampil.`);
+    if (segment.animation_duration > span / 2) warnings.push(`Animasi segmen ${index + 1} dibatasi setengah durasi agar teks tetap terlihat.`);
     previousEnd = Math.max(previousEnd, segment.end);
   });
   if (previousEnd < duration - 0.05) warnings.push(`Ada jeda ${ (duration - previousEnd).toFixed(1) } dtk setelah segmen terakhir.`);
@@ -160,7 +104,7 @@ function previewTextColor(composition: Composition): string {
 function fitPreviewFontSize(text: string, settings: Composition["text"]): number {
   const boxWidth = Math.min(82, settings.x * 2, (100 - settings.x) * 2) * 7.2;
   const centerY = settings.y * 12.8;
-  const minSize = Math.max(18, Math.round(settings.font_size * 0.72));
+  const minSize = Math.max(20, Math.round(settings.font_size * 0.72));
   for (let size = settings.font_size; size >= minSize; size -= Math.max(1, Math.round(settings.font_size * 0.035))) {
     const columns = Math.max(1, Math.floor(boxWidth / (size * 0.56)));
     const lines = text.replace(/\r/gu, "").split("\n").flatMap((paragraph) => {
@@ -174,7 +118,7 @@ function fitPreviewFontSize(text: string, settings: Composition["text"]): number
       return wrapped;
     });
     const blockHeight = size * settings.line_spacing * lines.length;
-    if (lines.length <= 14 && boxWidth >= size && Math.max(...lines.map((line) => line.length), 0) <= columns && centerY - blockHeight / 2 >= 0 && centerY + blockHeight / 2 <= 1280) return size;
+    if (lines.length <= 14 && boxWidth >= size && Math.max(...lines.map((line) => line.length), 0) <= columns && centerY - blockHeight / 2 >= 64 && centerY + blockHeight / 2 <= 1216) return size;
   }
   return minSize;
 }
@@ -203,6 +147,13 @@ export default function MoodQuotesPage() {
   const router = useRouter();
   const backgroundVideo = useRef<HTMLVideoElement>(null);
   const musicAudio = useRef<HTMLAudioElement>(null);
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const saveRevisionRef = useRef(0);
+  const musicWaitingOffsetRef = useRef(false);
+  const musicSyncKeyRef = useRef("");
+  const timelineGestureRef = useRef<{ id: string; mode: "move" | "resize-start" | "resize-end"; pointerId: number; originX: number; start: number; end: number; blocked: boolean } | null>(null);
+  const musicGestureRef = useRef<{ pointerId: number; originX: number; offset: number } | null>(null);
+  const timelineDraggedRef = useRef(false);
   const initialization = useRef<Promise<{ categories: Config; sources: SourceItem[]; projects: ProjectSummary[]; detail: ProjectDetail; id: string | null }> | null>(null);
   const thumbnailRequest = useRef(0);
   const thumbnailUrlRef = useRef("");
@@ -231,6 +182,9 @@ export default function MoodQuotesPage() {
   const [job, setJob] = useState<MoodJob | null>(null);
   const [playhead, setPlayhead] = useState(0);
   const [playing, setPlaying] = useState(false);
+  const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>(null);
+  const [timelineZoom, setTimelineZoom] = useState(28);
+  const [timelineSnap, setTimelineSnap] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -239,13 +193,12 @@ export default function MoodQuotesPage() {
   const [thumbnailLoading, setThumbnailLoading] = useState(false);
   const [thumbnailError, setThumbnailError] = useState("");
 
-  const saveChain = useRef<Promise<unknown>>(Promise.resolve());
+  const saveQueue = useRef<ReturnType<typeof createSerializedSaveQueue> | null>(null);
+  if (!saveQueue.current) saveQueue.current = createSerializedSaveQueue();
   const refreshProjects = () => request<ProjectSummary[]>("/mood-projects").then(setProjects).catch(() => undefined);
   const enqueueDraftSave = (payload: Record<string, unknown>) => {
     if (!projectId) return Promise.resolve(null);
-    const task = saveChain.current.catch(() => undefined).then(() => request(`/mood-projects/${projectId}`, { method: "PATCH", body: JSON.stringify(payload) }));
-    saveChain.current = task.then(() => undefined, () => undefined);
-    return task;
+    return saveQueue.current!(() => request(`/mood-projects/${projectId}`, { method: "PATCH", body: JSON.stringify(payload) }));
   };
   const applyDetail = (detail: ProjectDetail) => {
     setDraft({ title: detail.project.title, category_id: detail.project.category_id, subcategory_id: detail.project.subcategory_id, custom_topic: detail.project.custom_topic,
@@ -253,7 +206,8 @@ export default function MoodQuotesPage() {
     setSelected(detail.project.selected_quote);
     setActiveGeneration(detail.generations.find((generation) => generation.quotes.some((quote) => quote.id === detail.project.selected_quote?.id))?.id || null);
     setCurrentRenderId(detail.project.current_render?.id || null);
-    setComposition(normalizeComposition(detail.project.composition, detail.project.selected_quote));
+    const normalized = normalizeComposition(detail.project.composition, detail.project.selected_quote);
+    setComposition(normalized); setSelectedSegmentId(normalized.segments[0]?.id || null);
     const renderRows = detail.renders || [];
     setAssets(detail.assets); setQuotes(detail.quotes); setGenerations(detail.generations); setFavorites(detail.favorites);
     setRenders(detail.project.current_render && !renderRows.some((render) => render.id === detail.project.current_render?.id) ? [detail.project.current_render, ...renderRows] : renderRows);
@@ -284,16 +238,22 @@ export default function MoodQuotesPage() {
 
   useEffect(() => {
     if (!loaded || !projectId || job && ["queued", "preparing", "rendering"].includes(job.status)) return;
+    const revision = ++saveRevisionRef.current;
     const timer = setTimeout(async () => {
+      saveTimerRef.current = null;
       setSaving(true);
       try {
         await enqueueDraftSave({ ...draft, selected_quote: selected, composition });
         setError("");
         void refreshProjects();
       } catch (reason) { setError((reason as Error).message); }
-      finally { setSaving(false); }
+      finally { if (revision === saveRevisionRef.current) setSaving(false); }
     }, 500);
-    return () => clearTimeout(timer);
+    saveTimerRef.current = timer;
+    return () => {
+      clearTimeout(timer);
+      if (saveTimerRef.current === timer) saveTimerRef.current = null;
+    };
   }, [loaded, projectId, draft, selected, composition, job]);
 
   useEffect(() => {
@@ -341,35 +301,90 @@ export default function MoodQuotesPage() {
 
   useEffect(() => {
     if (!playing) return;
+    let last = performance.now();
     const timer = setInterval(() => {
-      setPlayhead((time) => {
-        const next = time + 1 / 30;
-        if (next >= composition.duration) { setPlaying(false); backgroundVideo.current?.pause(); musicAudio.current?.pause(); return 0; }
-        return next;
-      });
-    }, 1000 / 30);
+      const now = performance.now();
+      const elapsed = (now - last) / 1000;
+      last = now;
+      setPlayhead((time) => Math.min(composition.duration, time + elapsed));
+    }, 33);
     return () => clearInterval(timer);
   }, [playing, composition.duration]);
 
   useEffect(() => {
-    if (musicAudio.current) {
-      const musicDuration = composition.music.loop ? composition.duration : Math.min(composition.duration, composition.music.trim_end - composition.music.trim_start);
-      let volume = composition.music.volume;
-      if (composition.music.fade_in > 0 && playhead < composition.music.fade_in) volume *= playhead / composition.music.fade_in;
-      if (composition.music.fade_out > 0 && playhead > musicDuration - composition.music.fade_out) volume *= Math.max(0, (musicDuration - playhead) / composition.music.fade_out);
-      musicAudio.current.volume = Math.max(0, Math.min(1, volume));
+    if (playing && playhead >= composition.duration) {
+      setPlaying(false); setPlayhead(0); backgroundVideo.current?.pause(); musicAudio.current?.pause();
     }
+  }, [playing, playhead, composition.duration]);
+
+  useEffect(() => {
+    if (step === 4 && playing && backgroundVideo.current?.paused) void backgroundVideo.current.play().catch(() => undefined);
+  }, [step, playing]);
+
+  useEffect(() => {
+    if (!playing) return;
+    if (composition.text_mode !== "sequential") return;
+    const active = composition.segments.find((segment) => playhead >= segment.start && playhead < segment.end && segment.text.trim());
+    if (active) setSelectedSegmentId((current) => current === active.id ? current : active.id);
+  }, [playing, playhead, composition.text_mode, composition.segments]);
+
+  useEffect(() => {
+    const audio = musicAudio.current;
+    const music = composition.music;
+    const asset = assets.find((item) => item.id === music.asset_id);
+    const span = musicPlaybackSpan(music, composition.duration, asset?.duration ?? null);
+    const relativeTime = playhead - music.offset;
+    const syncKey = `${asset?.id || ""}:${music.offset}:${music.trim_start}:${music.trim_end}:${music.loop}`;
+    if (musicSyncKeyRef.current !== syncKey) {
+      musicSyncKeyRef.current = syncKey;
+      if (audio && audio.readyState >= 1) {
+        const sourceSpan = Math.max(0.05, Math.min(music.trim_end, asset?.duration ?? music.trim_end) - music.trim_start);
+        audio.currentTime = music.trim_start + (relativeTime < 0 ? 0 : music.loop ? relativeTime % sourceSpan : Math.min(relativeTime, sourceSpan));
+      }
+    }
+    const audible = Boolean(playing && asset && !music.muted && music.volume > 0 && relativeTime >= 0 && relativeTime < span);
+    const waitingForOffset = Boolean(playing && asset && !music.muted && music.volume > 0 && relativeTime < 0);
+    let volume = audible ? music.volume : 0;
+    if (audible && music.fade_in > 0 && relativeTime < music.fade_in) volume *= relativeTime / music.fade_in;
+    if (audible && music.fade_out > 0 && relativeTime > span - music.fade_out) volume *= Math.max(0, (span - relativeTime) / music.fade_out);
+    if (audio) {
+      audio.volume = Math.max(0, Math.min(1, volume));
+      if (waitingForOffset) {
+        if (audio.paused) {
+          audio.currentTime = music.trim_start;
+          void audio.play().catch(() => undefined);
+        }
+      } else if (!audible) audio.pause();
+      else if (musicWaitingOffsetRef.current) {
+        audio.currentTime = music.trim_start;
+        if (audio.paused) void audio.play().catch(() => undefined);
+      }
+      else if (audio.paused) {
+        const sourceSpan = Math.max(0.05, music.trim_end - music.trim_start);
+        audio.currentTime = music.trim_start + (music.loop ? relativeTime % sourceSpan : Math.min(relativeTime, sourceSpan));
+        void audio.play().catch(() => undefined);
+      }
+    }
+    musicWaitingOffsetRef.current = waitingForOffset;
     if (backgroundVideo.current) {
       backgroundVideo.current.muted = composition.background.mute_audio;
       backgroundVideo.current.volume = composition.background.audio_volume;
     }
-  }, [playhead, composition.duration, composition.music, composition.background]);
+  }, [assets, playing, playhead, composition.duration, composition.music, composition.background]);
 
   const selectedCategory = config?.categories.find((item) => item.id === draft.category_id);
   const filteredCategories = useMemo(() => config?.categories.filter((category) => `${category.name} ${category.description} ${category.subcategories.map((item) => item.name).join(" ")}`.toLowerCase().includes(categorySearch.toLowerCase())) || [], [config, categorySearch]);
   const activeRender = renders.find((item) => item.id === currentRenderId) || null;
   const selectedAsset = assets.find((item) => item.id === composition.background.asset_id);
   const selectedMusic = assets.find((item) => item.id === composition.music.asset_id);
+  const selectedSegment = composition.segments.find((item) => item.id === selectedSegmentId) || null;
+  const selectedSegmentIndex = selectedSegment ? composition.segments.findIndex((item) => item.id === selectedSegment.id) : -1;
+  const timelinePixelsPerSecond = timelineZoom;
+  const timelineWidth = Math.ceil(timelinePixelsPerSecond * composition.duration);
+  const timelineTickStep = timelineZoom < 20 ? 5 : timelineZoom < 36 ? 2 : 1;
+  const timelineTicks = Array.from({ length: Math.floor(composition.duration / timelineTickStep) + 1 }, (_, index) => index * timelineTickStep);
+  const musicTimelineSpan = musicPlaybackSpan(composition.music, composition.duration, selectedMusic?.duration ?? null);
+  const timelineRulerStyle = { width: timelineWidth, "--tick": `${timelinePixelsPerSecond}px` } as CSSProperties;
   const providerInfo = config?.providers[draft.provider];
   const moodIds = [draft.category_id, draft.subcategory_id, selected?.mood || ""];
   const visualPresets = config?.visual_presets || [];
@@ -394,7 +409,18 @@ export default function MoodQuotesPage() {
     });
   };
   const updateBackground = <K extends keyof Composition["background"]>(key: K, value: Composition["background"][K]) => { invalidateRender(); setComposition((current) => ({ ...current, background: { ...current.background, [key]: value } })); };
-  const updateMusic = <K extends keyof Composition["music"]>(key: K, value: Composition["music"][K]) => { invalidateRender(); setComposition((current) => ({ ...current, music: { ...current.music, [key]: value } })); };
+  const updateMusic = <K extends keyof Composition["music"]>(key: K, value: Composition["music"][K]) => {
+    const asset = assets.find((item) => item.id === composition.music.asset_id);
+    const next = { ...composition.music, [key]: value };
+    if (key === "offset" && (Number(value) < 0 || Number(value) >= composition.duration)) { setError("Posisi mulai musik harus berada di dalam durasi video."); return; }
+    if ((key === "trim_start" || key === "trim_end") && (next.trim_start < 0 || next.trim_end - next.trim_start < 0.05 || Boolean(asset?.duration && next.trim_end > asset.duration))) { setError("Rentang trim harus menyisakan minimal 0,05 detik dan tidak boleh melewati durasi file musik."); return; }
+    const available = musicPlaybackSpan(next, composition.duration, asset?.duration ?? null);
+    if ((key === "offset" || key === "trim_start" || key === "trim_end" || key === "fade_in" || key === "fade_out" || key === "loop") && next.fade_in + next.fade_out > available + 0.001) {
+      setError("Fade-in dan fade-out melebihi durasi musik yang terdengar. Kurangi fade atau ubah trim/offset."); return;
+    }
+    invalidateRender(); setError("");
+    setComposition((current) => ({ ...current, music: { ...current.music, [key]: value } }));
+  };
   const updateVisual = <K extends keyof VisualSettings>(key: K, value: VisualSettings[K]) => {
     invalidateRender();
     setComposition((current) => {
@@ -405,22 +431,17 @@ export default function MoodQuotesPage() {
     });
   };
   const updateDuration = (duration: number) => {
+    if (composition.text_mode === "sequential" && composition.segments.some((segment) => segment.end > duration)) {
+      setError("Durasi baru memotong segmen. Perpanjang durasi atau atur timing segmen terlebih dahulu."); return;
+    }
+    if (composition.music.offset >= duration) { setError("Durasi baru memotong posisi mulai musik. Atur offset musik lebih awal terlebih dahulu."); return; }
+    const musicAsset = assets.find((asset) => asset.id === composition.music.asset_id);
+    const musicSpan = musicPlaybackSpan(composition.music, duration, musicAsset?.duration ?? null);
+    if (composition.music.asset_id && composition.music.fade_in + composition.music.fade_out > musicSpan + 0.001) {
+      setError("Durasi baru terlalu pendek untuk fade musik. Kurangi fade atau atur offset lebih awal."); return;
+    }
     invalidateRender();
     setComposition((current) => {
-      if (current.text_mode === "sequential" && current.segments.length) {
-        const weights = current.segments.map((segment) => Math.max(0, segment.end - segment.start - 0.1));
-        const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
-        const available = duration - current.segments.length * 0.1;
-        let cursor = 0;
-        const segments = current.segments.map((segment, index) => {
-          const start = cursor;
-          const span = 0.1 + (totalWeight ? available * weights[index] / totalWeight : available / current.segments.length);
-          const end = index === current.segments.length - 1 ? duration : start + span;
-          cursor = end;
-          return { ...segment, start, end, animation_duration: Math.max(0.1, Math.min(segment.animation_duration, (end - start) / 2)) };
-        });
-        return { ...current, duration, segments, text: { ...current.text, start: 0, end: duration } };
-      }
       const start = Math.min(current.text.start, duration - 0.1);
       return { ...current, duration, text: { ...current.text, start, end: Math.max(start + 0.1, Math.min(current.text.end, duration)) } };
     });
@@ -428,8 +449,18 @@ export default function MoodQuotesPage() {
 
   const persist = async (nextDraft = draft, nextQuote = selected, nextComposition = composition) => {
     if (!projectId) return;
-    await enqueueDraftSave({ ...nextDraft, selected_quote: nextQuote, composition: nextComposition });
-    setSaving(false); void refreshProjects();
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = null;
+    const revision = ++saveRevisionRef.current;
+    setSaving(true);
+    try {
+      await enqueueDraftSave({ ...nextDraft, selected_quote: nextQuote, composition: nextComposition });
+      void refreshProjects();
+    } finally { if (revision === saveRevisionRef.current) setSaving(false); }
+  };
+  const saveBeforeNavigate = async (target: string) => {
+    try { await persist(); window.location.assign(target); }
+    catch (reason) { setError((reason as Error).message); }
   };
   const generate = async () => {
     if (!consent) { setError("Setujui pengiriman prompt quote ke provider untuk permintaan ini."); return; }
@@ -448,10 +479,16 @@ export default function MoodQuotesPage() {
     setSelected(chosen);
     const duration = draft.length === "short" ? 8 : draft.length === "medium" ? 18 : 32;
     const segments = makeTimedSegments(chosen.text, duration, composition.visual.segment_animation, chosen.segments);
-    setComposition((current) => ({ ...current, duration, segments, segments_source: "auto", text: { ...current.text, text: chosen.text, start: 0, end: duration } }));
+    setComposition((current) => {
+      const offset = Math.min(current.music.offset, duration - 0.1);
+      const available = musicPlaybackSpan({ ...current.music, offset }, duration, assets.find((asset) => asset.id === current.music.asset_id)?.duration ?? null);
+      const fade_in = Math.min(current.music.fade_in, Math.max(0, available / 2));
+      return { ...current, duration, segments, segments_source: "auto", music: { ...current.music, offset, fade_in, fade_out: Math.min(current.music.fade_out, Math.max(0, available - fade_in)) }, text: { ...current.text, text: chosen.text, start: 0, end: duration } };
+    });
+    setSelectedSegmentId(segments[0]?.id || null);
     declinedManualQuoteEdit.current = null;
     if (generationId) setActiveGeneration(generationId);
-    setNotice("Quote dipilih. Editor video dapat digunakan tanpa generate ulang.");
+    setNotice(composition.music.offset >= duration ? "Quote dipilih. Offset musik disesuaikan agar tetap di dalam durasi baru." : "Quote dipilih. Editor video dapat digunakan tanpa generate ulang.");
   };
   const favorite = async (quote: Quote, generationId: string | null) => {
     try {
@@ -500,16 +537,35 @@ export default function MoodQuotesPage() {
     });
   };
 
+  const commitTimelineSegments = (segments: TextSegment[], selectedId?: string | null) => {
+    invalidateRender();
+    setComposition((current) => ({ ...current, segments, segments_source: "manual", text: {
+      ...current.text, text: segments.map((item) => item.text).join(" "),
+      start: segments.length ? Math.min(...segments.map((item) => item.start)) : 0,
+      end: segments.length ? Math.max(...segments.map((item) => item.end)) : current.duration,
+    } }));
+    if (selectedId !== undefined) setSelectedSegmentId(selectedId);
+    setError("");
+  };
+
   const updateSegment = (id: string, key: keyof TextSegment, value: string | number) => {
     if (key === "text") {
       const otherCharacters = composition.segments.filter((item) => item.id !== id).reduce((count, item) => count + item.text.length, 0);
       if (otherCharacters + String(value).length + composition.segments.length - 1 > 500) { setError("Gabungan teks segmen maksimal 500 karakter."); return; }
     }
-    invalidateRender();
-    setComposition((current) => {
-      const segments = current.segments.map((item) => item.id === id ? { ...item, [key]: value } as TextSegment : item);
-      return { ...current, segments, segments_source: "manual", text: { ...current.text, text: segments.map((item) => item.text).join(" "), start: segments.length ? Math.min(...segments.map((item) => item.start)) : 0, end: segments.length ? Math.max(...segments.map((item) => item.end)) : current.duration } };
-    });
+    const segment = composition.segments.find((item) => item.id === id);
+    if (!segment) return;
+    if (key === "start" || key === "end") {
+      const result = updateSegmentTiming(composition.segments, id, key === "start" ? "resize-start" : "resize-end", Number(value) - segment[key], composition.duration, { start: segment.start, end: segment.end }, false);
+      if (result.blocked || result.clamped) { setError("Timing bentrok atau durasi segmen di bawah 0,5 detik. Segmen lain tidak digeser."); return; }
+      commitTimelineSegments(result.segments, id);
+      return;
+    }
+    if (key === "animation_duration" && Number(value) > Math.min(2, (segment.end - segment.start) / 2)) {
+      setError("Durasi animasi maksimal setengah durasi segmen agar teks tetap terlihat."); return;
+    }
+    const segments = composition.segments.map((item) => item.id === id ? { ...item, [key]: value } as TextSegment : item);
+    commitTimelineSegments(segments, id);
   };
 
   const reorderSegment = (index: number, direction: -1 | 1) => {
@@ -528,33 +584,62 @@ export default function MoodQuotesPage() {
   const addSegment = () => {
     if (composition.segments.length >= 8) { setError("Maksimal 8 segmen per video."); return; }
     const last = composition.segments[composition.segments.length - 1];
-    if (last && last.end - last.start < 0.5) { setError("Segmen terakhir terlalu singkat untuk dibagi. Tambah durasi dulu."); return; }
-    invalidateRender();
-    setComposition((current) => {
-      const segments = [...current.segments];
-      const lastSegment = segments[segments.length - 1];
-      const end = lastSegment?.end || current.duration;
-      const start = lastSegment ? (lastSegment.start + lastSegment.end) / 2 : 0;
-      if (lastSegment) segments[segments.length - 1] = { ...lastSegment, end: start, animation_duration: Math.min(lastSegment.animation_duration, Math.max(0.1, (start - lastSegment.start) / 2)) };
-      segments.push({ id: newSegmentId(), text: "", start, end, animation: "fade_up", animation_duration: Math.min(0.35, (end - start) / 2) });
-      return { ...current, segments, segments_source: "manual", text: { ...current.text, text: segments.map((item) => item.text).join(" ") } };
-    });
+    if (last && last.end - last.start < 1) { setError("Butuh sedikitnya 1 detik untuk membagi segmen menjadi dua bagian yang terbaca."); return; }
+    const end = last?.end ?? composition.duration;
+    const start = last ? (last.start + last.end) / 2 : 0;
+    const segments = [...composition.segments];
+    if (last) segments[segments.length - 1] = { ...last, end: start, animation_duration: Math.min(last.animation_duration, (start - last.start) / 2) };
+    const next = { id: newSegmentId(), text: "", start, end, animation: "fade_up" as const, animation_duration: Math.min(0.35, (end - start) / 2) };
+    commitTimelineSegments([...segments, next], next.id);
   };
 
   const deleteSegment = (id: string) => {
-    invalidateRender();
-    setComposition((current) => {
-      const segments = current.segments.filter((item) => item.id !== id);
-      return { ...current, segments, segments_source: "manual", text: { ...current.text, text: segments.map((item) => item.text).join(" "), start: segments.length ? Math.min(...segments.map((item) => item.start)) : 0, end: segments.length ? Math.max(...segments.map((item) => item.end)) : current.duration } };
-    });
+    const segment = composition.segments.find((item) => item.id === id);
+    if (!segment || !window.confirm(`Hapus teks segmen “${segment.text.slice(0, 80)}” dari hasil render? Quote asli tetap ada di draft.`)) return;
+    const segments = composition.segments.filter((item) => item.id !== id);
+    commitTimelineSegments(segments, segments[Math.min(composition.segments.findIndex((item) => item.id === id), segments.length - 1)]?.id || null);
+  };
+
+  const splitSelectedSegment = () => {
+    if (composition.segments.length >= 8) { setError("Maksimal 8 segmen per video."); return; }
+    const next = splitSegment(composition.segments, selectedSegmentId || "", composition.duration);
+    if (!next) { setError("Teks perlu minimal empat kata dan durasi segmen minimal 1 detik untuk split aman."); return; }
+    const index = next.findIndex((item) => item.id === selectedSegmentId);
+    commitTimelineSegments(next, next[index + 1]?.id || selectedSegmentId);
+  };
+
+  const mergeSelectedSegment = (direction: -1 | 1) => {
+    const next = mergeSegment(composition.segments, selectedSegmentId || "", direction);
+    if (!next) { setError(direction < 0 ? "Tidak ada segmen sebelumnya untuk digabung." : "Tidak ada segmen berikutnya untuk digabung."); return; }
+    const index = composition.segments.findIndex((item) => item.id === selectedSegmentId);
+    commitTimelineSegments(next, next[Math.min(index, index + direction)]?.id || null);
+  };
+
+  const duplicateSelectedSegment = () => {
+    if (composition.segments.length >= 8) { setError("Maksimal 8 segmen per video."); return; }
+    const next = duplicateTimelineSegment(composition.segments, selectedSegmentId || "", composition.duration);
+    if (!next) { setError("Tidak ada gap 0,5 detik untuk duplikat. Timing segmen lain tidak digeser."); return; }
+    const index = next.findIndex((item) => item.id === selectedSegmentId);
+    commitTimelineSegments(next, next[index + 1]?.id || next[index - 1]?.id || null);
+  };
+
+  const resetTimelineTiming = () => {
+    const next = resetSegmentTimings(composition.segments, composition.duration);
+    if (!next) { setError("Durasi komposisi terlalu pendek untuk jumlah segmen ini."); return; }
+    commitTimelineSegments(next, selectedSegmentId);
+    setNotice("Timing diratakan ulang; teks dan animasi tetap.");
   };
 
   const resetSegments = () => {
-    if (composition.segments_source === "manual" && !window.confirm("Segmentasi ulang akan mengganti teks dan animasi segmen manual. Lanjutkan?")) return;
+    const message = composition.segments_source === "manual"
+      ? "Segmentasi ulang akan mengganti teks dan timing segmen manual. Quote asli draft tetap dipertahankan. Lanjutkan?"
+      : "Buat ulang segmen otomatis? Edit timing dan animasi saat ini akan diganti.";
+    if (!window.confirm(message)) return;
     const text = composition.text.text || selected?.text || "";
     const segments = makeTimedSegments(text, composition.duration, composition.visual.segment_animation, selected?.text === text ? selected.segments : []);
     invalidateRender();
     setComposition((current) => ({ ...current, text_mode: "sequential", segments, segments_source: "auto", text: { ...current.text, text, start: 0, end: current.duration } }));
+    setSelectedSegmentId(segments[0]?.id || null);
     declinedManualQuoteEdit.current = null;
   };
 
@@ -571,7 +656,18 @@ export default function MoodQuotesPage() {
       const asset = await request<Asset>(`/mood-projects/${projectId}/assets`, { method: "POST", body: form });
       setAssets((items) => [asset, ...items]);
       if (kind === "music") {
-        setComposition((current) => ({ ...current, music: { ...current.music, asset_id: asset.id, trim_end: Math.min(current.music.trim_end, asset.duration || current.music.trim_end) } }));
+        if (asset.duration !== null && asset.duration < 0.05) setError("File musik harus berdurasi minimal 0,05 detik.");
+        else {
+          invalidateRender();
+          setComposition((current) => {
+          const fileDuration = asset.duration || current.music.trim_end;
+          const trim_start = Math.min(current.music.trim_start, Math.max(0, fileDuration - 0.05));
+          const trim_end = Math.min(fileDuration, Math.max(trim_start + Math.min(0.05, fileDuration - trim_start), Math.min(current.music.trim_end, fileDuration)));
+          const available = current.music.loop ? current.duration - current.music.offset : Math.min(current.duration - current.music.offset, trim_end - trim_start);
+          const fade_in = Math.min(current.music.fade_in, Math.max(0, available / 2));
+          return { ...current, music: { ...current.music, asset_id: asset.id, trim_start, trim_end, fade_in, fade_out: Math.min(current.music.fade_out, Math.max(0, available - fade_in)) } };
+          });
+        }
       }
       else { updateBackground("kind", kind === "background_image" ? "image" : "video"); updateBackground("asset_id", asset.id); }
       setNotice(`${file.name} tersimpan di aset lokal draft.`);
@@ -593,10 +689,16 @@ export default function MoodQuotesPage() {
     const asset = assets.find((item) => item.id === assetId);
     if (!asset) { updateMusic("asset_id", null); return; }
     const duration = asset.duration || composition.music.trim_end;
+    if (duration < 0.05) { setError("File musik harus berdurasi minimal 0,05 detik."); return; }
     setComposition((current) => {
       const start = Math.min(current.music.trim_start, Math.max(0, duration - 0.05));
-      return { ...current, music: { ...current.music, asset_id: asset.id, trim_start: start, trim_end: Math.max(start + 0.01, Math.min(current.music.trim_end, duration)) } };
+      const end = Math.min(duration, Math.max(start + Math.min(0.05, duration - start), Math.min(current.music.trim_end, duration)));
+      const available = current.music.loop ? current.duration - current.music.offset : Math.min(current.duration - current.music.offset, end - start);
+      const fadeIn = Math.min(current.music.fade_in, Math.max(0, available / 2));
+      const fadeOut = Math.min(current.music.fade_out, Math.max(0, available - fadeIn));
+      return { ...current, music: { ...current.music, asset_id: asset.id, trim_start: start, trim_end: end, fade_in: fadeIn, fade_out: fadeOut } };
     });
+    invalidateRender(); setError("");
   };
   const render = async () => {
     if (!selected) { setError("Pilih quote sebelum render."); setStep(2); return; }
@@ -625,20 +727,97 @@ export default function MoodQuotesPage() {
       try { backgroundVideo.current.currentTime = composition.background.video_start + (composition.background.loop ? next % span : Math.min(next, span)); } catch { /* Metadata may still be loading. */ }
     }
     if (musicAudio.current && selectedMusic && musicAudio.current.readyState >= 1) {
+      const relative = next - composition.music.offset;
       const span = Math.max(0.05, composition.music.trim_end - composition.music.trim_start);
-      try { musicAudio.current.currentTime = composition.music.trim_start + (composition.music.loop ? next % span : Math.min(next, span)); } catch { /* Metadata may still be loading. */ }
+      const playSpan = musicPlaybackSpan(composition.music, composition.duration, selectedMusic.duration);
+      if (relative < 0 || relative >= playSpan && !composition.music.loop) {
+        musicAudio.current.pause();
+        try { musicAudio.current.currentTime = relative < 0 ? composition.music.trim_start : composition.music.trim_end; } catch { /* Metadata may still be loading. */ }
+      } else {
+        try { musicAudio.current.currentTime = composition.music.trim_start + (composition.music.loop ? relative % span : Math.min(relative, span)); } catch { /* Metadata may still be loading. */ }
+      }
     }
+  };
+  const beginTimelineGesture = (event: ReactPointerEvent<HTMLElement>, id: string, mode: "move" | "resize-start" | "resize-end") => {
+    if (isRunning || composition.text_mode !== "sequential") return;
+    event.preventDefault(); event.stopPropagation();
+    const segment = composition.segments.find((item) => item.id === id);
+    if (!segment) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    timelineGestureRef.current = { id, mode, pointerId: event.pointerId, originX: event.clientX, start: segment.start, end: segment.end, blocked: false };
+    setSelectedSegmentId(id);
+  };
+  const beginMusicGesture = (event: ReactPointerEvent<HTMLElement>) => {
+    if (isRunning || !selectedMusic) return;
+    event.preventDefault(); event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    musicGestureRef.current = { pointerId: event.pointerId, originX: event.clientX, offset: composition.music.offset };
+  };
+  const moveTimelineGesture = (event: ReactPointerEvent<HTMLElement>) => {
+    const gesture = timelineGestureRef.current;
+    if (gesture?.pointerId === event.pointerId) {
+      const delta = (event.clientX - gesture.originX) / timelinePixelsPerSecond;
+      if (Math.abs(event.clientX - gesture.originX) > 3) timelineDraggedRef.current = true;
+      const result = updateSegmentTiming(composition.segments, gesture.id, gesture.mode, delta, composition.duration, { start: gesture.start, end: gesture.end }, timelineSnap);
+      gesture.blocked = result.blocked || result.clamped;
+      if (!result.blocked && result.changed) commitTimelineSegments(result.segments, gesture.id);
+      return;
+    }
+    const musicGesture = musicGestureRef.current;
+    if (musicGesture?.pointerId === event.pointerId) {
+      const raw = musicGesture.offset + (event.clientX - musicGesture.originX) / timelinePixelsPerSecond;
+      const boundaries = [0, composition.duration, ...composition.segments.flatMap((item) => [item.start, item.end])];
+      const offset = Math.max(0, Math.min(Math.max(0, composition.duration - 0.1), timelineSnap ? snapTimelineTime(raw, boundaries) : raw));
+      if (Math.abs(event.clientX - musicGesture.originX) > 3) timelineDraggedRef.current = true;
+      if (offset !== composition.music.offset) updateMusic("offset", Number(offset.toFixed(3)));
+    }
+  };
+  const endTimelineGesture = (event: ReactPointerEvent<HTMLElement>) => {
+    const gesture = timelineGestureRef.current;
+    if (gesture?.pointerId === event.pointerId) {
+      timelineGestureRef.current = null;
+      if (gesture.blocked) setNotice("Gerak dibatasi agar segmen tidak overlap; timing segmen lain tetap.");
+    }
+    if (musicGestureRef.current?.pointerId === event.pointerId) musicGestureRef.current = null;
+    window.setTimeout(() => { timelineDraggedRef.current = false; }, 0);
+  };
+  const seekTimelinePointer = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.target !== event.currentTarget) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    seek(timeAtPosition(event.clientX, rect.left, timelinePixelsPerSecond, composition.duration));
+  };
+  const selectTimelineSegment = (segment: TextSegment) => {
+    if (timelineDraggedRef.current) { timelineDraggedRef.current = false; return; }
+    setSelectedSegmentId(segment.id); seek(segment.start);
+  };
+  const startMusicPreview = (at = playhead) => {
+    const audio = musicAudio.current;
+    const music = composition.music;
+    if (!audio || !selectedMusic || music.muted || music.volume <= 0) return;
+    const relative = at - music.offset;
+    const span = musicPlaybackSpan(music, composition.duration, selectedMusic.duration);
+    if (relative >= span && !music.loop) return;
+    const sourceSpan = Math.max(0.05, Math.min(music.trim_end, selectedMusic.duration || music.trim_end) - music.trim_start);
+    audio.currentTime = music.trim_start + (relative <= 0 ? 0 : music.loop ? relative % sourceSpan : Math.min(relative, sourceSpan));
+    let volume = relative < 0 ? 0 : music.volume;
+    if (relative >= 0 && music.fade_in > 0 && relative < music.fade_in) volume *= relative / music.fade_in;
+    if (relative >= 0 && music.fade_out > 0 && relative > span - music.fade_out) volume *= Math.max(0, (span - relative) / music.fade_out);
+    audio.volume = volume;
+    void audio.play().catch(() => setError("Browser memblokir preview audio. Tekan Play lagi untuk memberi izin audio."));
   };
   const togglePreview = async () => {
     if (playing) { setPlaying(false); backgroundVideo.current?.pause(); musicAudio.current?.pause(); return; }
+    const startAt = playhead >= composition.duration ? 0 : playhead;
     if (playhead >= composition.duration) seek(0);
     setPlaying(true);
-    try { await backgroundVideo.current?.play(); } catch { /* Image/solid preview uses local clock. */ }
-    try { await musicAudio.current?.play(); } catch { /* Browser may require a user gesture for audio. */ }
+    const videoPlay = backgroundVideo.current?.play();
+    startMusicPreview(startAt);
+    try { await videoPlay; } catch { /* Image/solid preview uses local clock. */ }
   };
   const openFullPreview = (autoplay: boolean) => {
+    void persist().catch((reason) => setError((reason as Error).message));
     setStep(4); setPlayhead(0); setPlaying(autoplay);
-    if (autoplay) window.setTimeout(() => { void backgroundVideo.current?.play(); void musicAudio.current?.play(); }, 0);
+    if (autoplay) startMusicPreview(0);
   };
   const applyVisualPreset = (id: string) => {
     const preset = config?.visual_presets.find((item) => item.id === id);
@@ -746,7 +925,8 @@ export default function MoodQuotesPage() {
   const previewColor = previewTextColor(composition);
   const previewFontSize = fitPreviewFontSize(activeText || composition.text.text, composition.text);
   const sequenceWarningsNow = composition.text_mode === "sequential" ? sequenceWarnings(composition.segments, composition.duration) : [];
-  const visualOverflowWarning = composition.text_mode === "sequential" && activeText && previewFontSize < composition.text.font_size * 0.74;
+  const visualOverflowWarning = Boolean(activeText && quoteActive) && previewFontSize < composition.text.font_size * 0.74;
+  const singleTextWarning = composition.text_mode === "single" && Boolean(composition.text.text) && (wordCount(composition.text.text) > 18 || visualOverflowWarning);
   const quotePreviewStyle = {
     left: `${composition.text.x}%`, top: `${composition.text.y}%`, width: `${Math.min(82, composition.text.x * 2, (100 - composition.text.x) * 2)}%`,
     color: previewColor, fontFamily: `"${composition.text.font}", Arial, sans-serif`,
@@ -779,11 +959,11 @@ export default function MoodQuotesPage() {
 
   return <>
     <div className="page-intro mood-intro"><Link href="/create" className="back-link"><ArrowLeft size={14}/> Semua mode</Link><div className="eyebrow">KLIPNARA STUDIO · {modeName.toUpperCase()}</div><h1>{draft.title || modeName}</h1><p>Pilih mood, susun quote, lalu buat video lokal tanpa memanggil AI saat edit atau render.</p></div>
-    <div className="mood-workspace-head"><div className="mood-draft-picker"><label className="field"><span>Draft tersimpan</span><select value={projectId} onChange={(event) => { if (event.target.value) window.location.assign(`/mood?id=${event.target.value}`); }}><option value={projectId}>{draft.title || "Draft saat ini"}</option>{projects.filter((item) => item.id !== projectId).map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label><button type="button" className="button button-outline" onClick={() => window.location.assign("/mood")}><Plus size={14}/> Draft baru</button></div><span className="autosave-state">{saving ? <><LoaderCircle size={13} className="spin"/> Menyimpan…</> : <><Check size={13}/> Autosave lokal</>}</span></div>
+    <div className="mood-workspace-head"><div className="mood-draft-picker"><label className="field"><span>Draft tersimpan</span><select value={projectId} onChange={(event) => { if (event.target.value && event.target.value !== projectId) void saveBeforeNavigate(`/mood?id=${event.target.value}`); }}><option value={projectId}>{draft.title || "Draft saat ini"}</option>{projects.filter((item) => item.id !== projectId).map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label><button type="button" className="button button-outline" onClick={() => void saveBeforeNavigate("/mood")}><Plus size={14}/> Draft baru</button></div><span className="autosave-state">{saving ? <><LoaderCircle size={13} className="spin"/> Menyimpan…</> : <><Check size={13}/> Autosave lokal</>}</span></div>
     <nav className="mood-steps" aria-label="Tahapan Mood Quotes">{["Pilih Mood", "Generate Quotes", "Customize", "Preview & Render", "Review & Export"].map((label, index) => <button key={label} type="button" className={step === index + 1 ? "active" : step > index + 1 ? "done" : ""} onClick={() => setStep(index + 1)}><i>{step > index + 1 ? <Check size={13}/> : index + 1}</i><span>{label}</span></button>)}</nav>
     {error && <div className="notice notice-error"><AlertCircle size={16}/><span>{error}</span><button className="icon-button" onClick={() => setError("")} aria-label="Tutup pesan"><X size={14}/></button></div>}
     {notice && <div className="notice notice-success"><CheckCircle2 size={16}/><span>{notice}</span><button className="icon-button" onClick={() => setNotice("")} aria-label="Tutup pesan"><X size={14}/></button></div>}
-    <audio ref={musicAudio} src={selectedMusic ? `${API}${selectedMusic.url}` : undefined} preload="metadata" onLoadedMetadata={(event) => { event.currentTarget.currentTime = Math.min(composition.music.trim_start, Math.max(0, event.currentTarget.duration - 0.05)); }} onTimeUpdate={(event) => { if (selectedMusic && event.currentTarget.currentTime >= Math.min(composition.music.trim_end, selectedMusic.duration || composition.music.trim_end)) { if (composition.music.loop) event.currentTarget.currentTime = composition.music.trim_start; else event.currentTarget.pause(); } }} onError={() => { if (selectedMusic) setError("Browser tidak dapat memutar file musik. Pilih ulang atau upload file audio valid."); }}/>
+    <audio ref={musicAudio} src={selectedMusic ? `${API}${selectedMusic.url}` : undefined} preload="metadata" onLoadedMetadata={(event) => { if (playing) startMusicPreview(playhead); else event.currentTarget.currentTime = Math.min(composition.music.trim_start, Math.max(0, event.currentTarget.duration - 0.05)); }} onTimeUpdate={(event) => { if (selectedMusic && event.currentTarget.currentTime >= Math.min(composition.music.trim_end, selectedMusic.duration || composition.music.trim_end)) { if (composition.music.loop) event.currentTarget.currentTime = composition.music.trim_start; else event.currentTarget.pause(); } }} onError={() => { if (selectedMusic) setError("Browser tidak dapat memutar file musik. Pilih ulang atau upload file audio valid."); }}/>
 
     {step === 1 && <section className="panel mood-step-panel"><div className="step-heading"><span className="step-number">01</span><div><h2>Pilih mood dan gaya</h2><p>Kategori terstruktur, topik opsional, dan target komposisi.</p></div></div>
       <div className="mood-form-grid"><label className="field"><span>Nama draft</span><input maxLength={120} value={draft.title} onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))}/></label>
@@ -833,6 +1013,7 @@ export default function MoodQuotesPage() {
           {visualOverflowWarning && <p className="mood-inline-warning">Teks preview perlu diperkecil mendekati batas aman; pecah segmen atau pindahkan teks agar tetap terbaca.</p>}
           {composition.segments_source === "manual" && <small>Quote utama berubah? Segment manual tidak akan ditimpa tanpa konfirmasi.</small>}
         </details> : <label className="field mood-single-text"><span>Teks tunggal</span><textarea maxLength={500} rows={4} value={composition.text.text} onChange={(event) => { updateText("text", event.target.value); if (selected) setSelected({ ...selected, text: event.target.value, segments: [{ text: event.target.value, order: 1 }] }); }}/></label>}
+        {singleTextWarning && <p className="mood-inline-warning">Teks tunggal panjang atau mendekati batas ukuran aman. Pecah teks atau ubah ukuran/posisi tanpa melewati safe area.</p>}
         <label className="field"><span>Gradient gelap belakang teks · {composition.text.gradient_opacity}%</span><input type="range" min="0" max="80" step="5" value={composition.text.gradient_opacity} onChange={(event) => updateText("gradient_opacity", Number(event.target.value))}/></label>
         <label className="check-field"><input type="checkbox" checked={composition.text.auto_contrast} onChange={(event) => updateText("auto_contrast", event.target.checked)}/> Auto Contrast untuk background warna solid/gradient</label>
       </details>
@@ -869,6 +1050,7 @@ export default function MoodQuotesPage() {
           <details open className="mood-control-group mood-music-group"><summary><Music2 size={15}/> Music</summary><label className="field"><span>Suasana rekomendasi</span><select value={selected?.music_mood || "calm"} onChange={() => undefined} disabled><option>{selected?.music_mood || "calm"}</option></select><small>Label rekomendasi saja; tidak mengunduh musik.</small></label><label className="field"><span>Audio lokal</span><select value={composition.music.asset_id || ""} onChange={(event) => chooseMusic(event.target.value)}><option value="">Tanpa musik</option>{assets.filter((asset) => asset.kind === "music").map((asset) => <option key={asset.id} value={asset.id}>{asset.name} · {asset.duration ? formatDuration(asset.duration) : ""}</option>)}</select></label><label className="asset-upload-button"><Upload size={14}/> Upload MP3, WAV, M4A<input type="file" accept="audio/mpeg,audio/wav,audio/mp4,.mp3,.wav,.m4a" onChange={(event) => void uploadAsset(event, "music")}/></label>{selectedMusic && <><label className="field"><span>Trim awal · {composition.music.trim_start.toFixed(1)} dtk</span><input type="range" min="0" max={Math.max(0, (selectedMusic.duration || 1) - 0.1)} step="0.1" value={Math.min(composition.music.trim_start, Math.max(0, (selectedMusic.duration || 1) - 0.1))} onChange={(event) => updateMusic("trim_start", Number(event.target.value))}/></label><label className="field"><span>Trim akhir (detik)</span><input type="number" min={composition.music.trim_start + 0.1} max={selectedMusic.duration || 1} step="0.1" value={Math.min(composition.music.trim_end, selectedMusic.duration || composition.music.trim_end)} onChange={(event) => updateMusic("trim_end", Number(event.target.value))}/></label><label className="field"><span>Volume musik · {Math.round(composition.music.volume * 100)}%</span><input type="range" min="0" max="1" step="0.05" value={composition.music.volume} onChange={(event) => updateMusic("volume", Number(event.target.value))}/></label><div className="color-pair"><label className="field"><span>Fade in · dtk</span><input type="number" min="0" max="10" step="0.1" value={composition.music.fade_in} onChange={(event) => updateMusic("fade_in", Number(event.target.value))}/></label><label className="field"><span>Fade out · dtk</span><input type="number" min="0" max="10" step="0.1" value={composition.music.fade_out} onChange={(event) => updateMusic("fade_out", Number(event.target.value))}/></label></div><label className="check-field"><input type="checkbox" checked={composition.music.loop} onChange={(event) => updateMusic("loop", event.target.checked)}/> Loop musik jika lebih pendek</label></>}</details>
         </div>
       </div>
+        {selectedMusic && <div className="mood-music-timeline-controls"><label className="field"><span>Music start offset · {composition.music.offset.toFixed(2)} dtk</span><input type="number" min="0" max={Math.max(0, composition.duration - 0.1)} step="0.05" value={composition.music.offset} onChange={(event) => updateMusic("offset", Number(event.target.value))}/></label><button type="button" className="button button-outline" onClick={() => updateMusic("muted", !composition.music.muted)}>{composition.music.muted ? <VolumeX size={14}/> : <Volume2 size={14}/>} {composition.music.muted ? "Unmute musik" : "Mute musik"}</button><button type="button" className="button button-outline" onClick={() => void togglePreview()}>{playing ? <Pause size={14}/> : <Play size={14}/>} {playing ? "Pause preview" : "Play preview"}</button></div>}
       <p className="mood-rights-note"><LockKeyhole size={14}/> Pastikan kamu memiliki hak penggunaan footage dan musik yang diunggah. Klipnara tidak menyertakan atau mengunduh media berhak cipta.</p>
       </div>
       <aside className="mood-live-preview panel" aria-label="Live Preview Mood Quotes">
@@ -889,10 +1071,65 @@ export default function MoodQuotesPage() {
         {showSafeArea && <small className="mood-safe-note">Panduan margin konservatif; area kontrol tiap platform berbeda. Garis panduan tidak masuk ke hasil render.</small>}
         <div className="mood-live-meta"><span><Clock3 size={13}/>{playhead.toFixed(1)} / {composition.duration}s · {activeSequenceSegment ? `segmen ${activeSegmentIndex + 1} · ${activeStart.toFixed(1)}–${activeEnd.toFixed(1)}s` : composition.text_mode === "single" ? `teks ${composition.text.start.toFixed(1)}–${composition.text.end.toFixed(1)}s` : "tanpa teks pada playhead"}</span><span>{composition.background.kind === "video" ? "Preview visual · frame statis" : "Preview visual langsung"}</span></div>
         <div className="mood-live-audio"><Music2 size={14}/><span>{selectedMusic ? `${selectedMusic.name} · musik ${composition.music.volume === 0 ? "0% (mute)" : `${Math.round(composition.music.volume * 100)}%`}${composition.background.kind === "video" && !composition.background.mute_audio && selectedAsset?.has_audio ? ` · background ${Math.round(composition.background.audio_volume * 100)}%` : ""}` : composition.background.kind === "video" && !composition.background.mute_audio && selectedAsset?.has_audio ? `${selectedAsset.name} · audio background ${Math.round(composition.background.audio_volume * 100)}%` : "Belum ada file musik terpilih. Mood hanya rekomendasi; output akan memakai audio background atau silent AAC."}</span></div>
-        <div className="mood-live-timeline"><div><button type="button" className="button button-outline" onClick={() => void togglePreview()}>{playing ? <X size={14}/> : <Play size={14}/>} {playing ? "Pause" : "Play"}</button><button type="button" className="button button-outline" disabled={previousSegmentIndex < 0} onClick={() => goToSegment(previousSegmentIndex)}>Segmen sebelumnya</button><button type="button" className="button button-outline" disabled={nextSegmentIndex < 0 || nextSegmentIndex >= composition.segments.length} onClick={() => goToSegment(nextSegmentIndex)}>Segmen berikutnya</button><button type="button" className="button button-outline" onClick={() => { seek(activeSequenceSegment?.start || 0); setPlaying(true); void musicAudio.current?.play(); }}><RotateCcw size={13}/> Replay</button></div><input aria-label="Timeline preview Customize" type="range" min="0" max={composition.duration} step="0.1" value={playhead} onChange={(event) => seek(Number(event.target.value))}/></div>
+        <div className="mood-live-timeline"><div><button type="button" className="button button-outline" onClick={() => void togglePreview()}>{playing ? <X size={14}/> : <Play size={14}/>} {playing ? "Pause" : "Play"}</button><button type="button" className="button button-outline" disabled={previousSegmentIndex < 0} onClick={() => goToSegment(previousSegmentIndex)}>Segmen sebelumnya</button><button type="button" className="button button-outline" disabled={nextSegmentIndex < 0 || nextSegmentIndex >= composition.segments.length} onClick={() => goToSegment(nextSegmentIndex)}>Segmen berikutnya</button><button type="button" className="button button-outline" onClick={() => { const start = activeSequenceSegment?.start ?? 0; seek(start); setPlaying(true); startMusicPreview(start); }}><RotateCcw size={13}/> Replay</button></div><input aria-label="Timeline preview Customize" type="range" min="0" max={composition.duration} step="0.1" value={playhead} onChange={(event) => seek(Number(event.target.value))}/></div>
         {composition.background.kind === "video" && <small className="mood-thumbnail-note">Frame diambil pada {composition.background.video_start.toFixed(1)}s; motion dan audio diperiksa di preview penuh.</small>}
         <div className="mood-live-actions"><button type="button" className="button button-outline" disabled={!selected} onClick={() => openFullPreview(true)}><Play size={14}/> Preview Penuh</button><button type="button" className="button button-primary" disabled={!selected} onClick={() => openFullPreview(false)}>Lanjut ke Preview &amp; Render <ArrowRight size={14}/></button></div>
       </aside>
+      <details className="mood-timeline-panel" open>
+        <summary><span><Clock3 size={15}/> Visual Timeline Editor</span><small>{composition.duration.toFixed(1)} dtk · {composition.segments.length} segmen · satu komposisi untuk preview/render</small></summary>
+        <div className="mood-timeline-toolbar">
+          <div><button type="button" className="button button-outline" onClick={() => void togglePreview()}>{playing ? <Pause size={14}/> : <Play size={14}/>} {playing ? "Pause" : "Play"}</button><button type="button" className="button button-outline" onClick={() => { seek(0); setPlaying(true); startMusicPreview(0); const videoPlay = backgroundVideo.current?.play(); void videoPlay?.catch(() => undefined); }}><RotateCcw size={13}/> Replay</button><span className="mood-timeline-clock">{playhead.toFixed(2)} / {composition.duration.toFixed(2)} dtk</span></div>
+          <div><label className="mood-timeline-snap"><input type="checkbox" checked={timelineSnap} onChange={(event) => setTimelineSnap(event.target.checked)}/> Snap</label><button type="button" className="icon-button" aria-label="Perkecil timeline" onClick={() => setTimelineZoom((value) => Math.max(12, value / 1.3))}><ZoomOut size={15}/></button><input className="mood-timeline-zoom" aria-label="Zoom timeline" type="range" min="12" max="120" step="2" value={Math.max(12, Math.min(120, timelineZoom))} onChange={(event) => setTimelineZoom(Number(event.target.value))}/><button type="button" className="icon-button" aria-label="Perbesar timeline" onClick={() => setTimelineZoom((value) => Math.min(120, value * 1.3))}><ZoomIn size={15}/></button></div>
+        </div>
+        <div className="mood-timeline-scroll" onPointerMove={moveTimelineGesture} onPointerUp={endTimelineGesture} onPointerCancel={endTimelineGesture}>
+          <div className="mood-timeline-grid" style={{ gridTemplateColumns: `112px ${timelineWidth}px` }}>
+            <div className="mood-timeline-label mood-timeline-ruler-label">WAKTU</div>
+            <div className="mood-timeline-ruler mood-timeline-track" style={timelineRulerStyle} onPointerDown={seekTimelinePointer}>
+              {timelineTicks.map((tick) => <span className="mood-timeline-tick" key={tick} style={{ left: tick * timelinePixelsPerSecond }}>{tick}s</span>)}
+              <i className="mood-timeline-playhead" style={{ left: playhead * timelinePixelsPerSecond }} />
+            </div>
+            <div className="mood-timeline-label">TEXT TRACK<small>{composition.text_mode === "single" ? "Single Text" : "Sequential Text"}</small></div>
+            <div className="mood-timeline-track mood-timeline-text-track" style={{ width: timelineWidth }} onPointerDown={seekTimelinePointer}>
+              {timelineTicks.map((tick) => <i className="mood-timeline-gridline" key={tick} style={{ left: tick * timelinePixelsPerSecond }} />)}
+              {composition.text_mode === "sequential" ? composition.segments.map((segment, index) => <div className={`mood-timeline-segment ${selectedSegmentId === segment.id ? "selected" : ""} ${activeSequenceSegment?.id === segment.id ? "active" : ""}`} key={segment.id} style={{ left: segment.start * timelinePixelsPerSecond, width: Math.max(12, (segment.end - segment.start) * timelinePixelsPerSecond) }}>
+                <button type="button" className="mood-timeline-segment-body" aria-label={`Pilih segmen ${index + 1}: ${segment.text || "kosong"}`} aria-pressed={selectedSegmentId === segment.id} onPointerDown={(event) => beginTimelineGesture(event, segment.id, "move")} onClick={() => selectTimelineSegment(segment)}><strong>{String(index + 1).padStart(2, "0")}</strong><span>{segment.text || "Segmen kosong"}</span></button>
+                <button type="button" className="mood-timeline-resize start" aria-label={`Ubah waktu mulai segmen ${index + 1}`} onPointerDown={(event) => beginTimelineGesture(event, segment.id, "resize-start")} />
+                <button type="button" className="mood-timeline-resize end" aria-label={`Ubah waktu akhir segmen ${index + 1}`} onPointerDown={(event) => beginTimelineGesture(event, segment.id, "resize-end")} />
+              </div>) : <div className={`mood-timeline-single ${playhead >= composition.text.start && playhead < composition.text.end ? "active" : ""}`} style={{ left: composition.text.start * timelinePixelsPerSecond, width: Math.max(12, (composition.text.end - composition.text.start) * timelinePixelsPerSecond) }}><span>{composition.text.text || "Belum ada teks"}</span></div>}
+              <i className="mood-timeline-playhead" style={{ left: playhead * timelinePixelsPerSecond }} />
+            </div>
+            <div className="mood-timeline-label">BACKGROUND<small>{selectedAsset?.name || (composition.background.kind === "gradient" ? "Gradient" : composition.background.kind === "solid" ? "Warna solid" : "Belum dipilih")}</small></div>
+            <div className="mood-timeline-track mood-timeline-background-track" style={{ width: timelineWidth }} onPointerDown={seekTimelinePointer}>
+              {timelineTicks.map((tick) => <i className="mood-timeline-gridline" key={tick} style={{ left: tick * timelinePixelsPerSecond }} />)}
+              <div className="mood-timeline-background-clip"><strong>{composition.background.kind.toUpperCase()} · {composition.visual.motion.replaceAll("_", " ")}</strong><span>{composition.visual.motion_intensity} motion · {composition.visual.preset_id || "custom style"}</span></div>
+              <i className="mood-timeline-playhead" style={{ left: playhead * timelinePixelsPerSecond }} />
+            </div>
+            <div className="mood-timeline-label">MUSIC TRACK<small>{selectedMusic ? selectedMusic.name : "Belum ada musik"}</small></div>
+            <div className="mood-timeline-track mood-timeline-music-track" style={{ width: timelineWidth }} onPointerDown={seekTimelinePointer}>
+              {timelineTicks.map((tick) => <i className="mood-timeline-gridline" key={tick} style={{ left: tick * timelinePixelsPerSecond }} />)}
+              {selectedMusic && musicTimelineSpan > 0 && <div className={`mood-timeline-music-clip ${composition.music.muted ? "muted" : ""}`} style={{ left: composition.music.offset * timelinePixelsPerSecond, width: Math.max(12, musicTimelineSpan * timelinePixelsPerSecond) }} onPointerDown={beginMusicGesture}>
+                {composition.music.fade_in > 0 && <i className="mood-timeline-fade-in" style={{ width: `${Math.min(100, composition.music.fade_in / Math.max(0.1, musicTimelineSpan) * 100)}%` }} />}{composition.music.fade_out > 0 && <i className="mood-timeline-fade-out" style={{ width: `${Math.min(100, composition.music.fade_out / Math.max(0.1, musicTimelineSpan) * 100)}%` }} />}
+                <span><strong>{selectedMusic.name}</strong> · trim {composition.music.trim_start.toFixed(1)}–{Math.min(composition.music.trim_end, selectedMusic.duration || composition.music.trim_end).toFixed(1)}s · {composition.music.muted ? "mute" : `${Math.round(composition.music.volume * 100)}%`}</span>
+              </div>}
+              <i className="mood-timeline-playhead" style={{ left: playhead * timelinePixelsPerSecond }} />
+            </div>
+          </div>
+        </div>
+        <div className="mood-timeline-bottom-controls">
+          <input aria-label="Timeline playhead" type="range" min="0" max={composition.duration} step="0.01" value={playhead} onChange={(event) => seek(Number(event.target.value))}/>
+          <span>Background track 9:16 · {composition.duration.toFixed(1)} dtk · preview video memakai frame statis</span>
+        </div>
+        {selectedSegment && composition.text_mode === "sequential" && <section className="mood-timeline-properties" aria-label="Properti segmen terpilih">
+          <div className="mood-timeline-properties-heading"><strong>Properti segmen {selectedSegmentIndex + 1}</strong><span>Style teks global tetap berlaku</span></div>
+          <label className="field mood-timeline-property-text"><span>Teks</span><textarea rows={2} maxLength={500} value={selectedSegment.text} onChange={(event) => updateSegment(selectedSegment.id, "text", event.target.value)}/></label>
+          <label className="field"><span>Mulai (detik)</span><input type="number" min="0" max={composition.duration} step="0.01" value={selectedSegment.start} onChange={(event) => updateSegment(selectedSegment.id, "start", Number(event.target.value))}/></label>
+          <label className="field"><span>Selesai (detik)</span><input type="number" min="0" max={composition.duration} step="0.01" value={selectedSegment.end} onChange={(event) => updateSegment(selectedSegment.id, "end", Number(event.target.value))}/></label>
+          <label className="field"><span>Durasi · {(selectedSegment.end - selectedSegment.start).toFixed(2)} dtk</span><input type="number" readOnly value={(selectedSegment.end - selectedSegment.start).toFixed(2)}/></label>
+          <label className="field"><span>Animasi</span><select value={selectedSegment.animation} onChange={(event) => updateSegment(selectedSegment.id, "animation", event.target.value)}>{segmentAnimationOptions.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+          <label className="field"><span>Durasi animasi</span><input type="number" min="0.1" max={Math.max(0.1, Math.min(2, (selectedSegment.end - selectedSegment.start) / 2))} step="0.05" value={selectedSegment.animation_duration} onChange={(event) => updateSegment(selectedSegment.id, "animation_duration", Number(event.target.value))}/></label>
+          <div className="mood-timeline-edit-actions"><button type="button" className="button button-outline" onClick={splitSelectedSegment}><Scissors size={13}/> Split</button><button type="button" className="button button-outline" onClick={() => mergeSelectedSegment(-1)} disabled={selectedSegmentIndex <= 0}>Gabung ←</button><button type="button" className="button button-outline" onClick={() => mergeSelectedSegment(1)} disabled={selectedSegmentIndex < 0 || selectedSegmentIndex >= composition.segments.length - 1}>Gabung →</button><button type="button" className="button button-outline" onClick={duplicateSelectedSegment}><Copy size={13}/> Duplikat</button><button type="button" className="button button-outline" onClick={() => reorderSegment(selectedSegmentIndex, -1)} disabled={selectedSegmentIndex <= 0}>Urut ↑</button><button type="button" className="button button-outline" onClick={() => reorderSegment(selectedSegmentIndex, 1)} disabled={selectedSegmentIndex < 0 || selectedSegmentIndex >= composition.segments.length - 1}>Urut ↓</button><button type="button" className="button button-outline" onClick={resetTimelineTiming}>Reset timing</button><button type="button" className="button button-outline" onClick={resetSegments}>Auto Re-segment</button><button type="button" className="button button-outline" onClick={() => deleteSegment(selectedSegment.id)}>Hapus</button></div>
+        </section>}
+      </details>
       <div className="mood-step-actions mood-customize-footer"><button className="button button-outline" onClick={() => setStep(2)}><ArrowLeft size={14}/> Kembali ke quote</button><span><Save size={14}/> Autosave aktif · perubahan tidak memanggil AI.</span></div>
       </div>
     </section>}
@@ -906,7 +1143,7 @@ export default function MoodQuotesPage() {
         {composition.text.gradient_opacity > 0 && <div className="mood-text-gradient" style={textGradientStyle}/>}
         {quoteActive && activeText && <div key={activeSequenceSegment?.id || "single-full-preview"} className={`mood-preview-quote align-${composition.text.alignment}`} style={quotePreviewStyle}>{activeText}</div>}
         <span className="mood-preview-resolution">9:16 · {composition.resolution}p · {composition.duration}s</span>
-      </div><div className="mood-preview-controls"><button className="button button-outline" onClick={() => void togglePreview()}>{playing ? <X size={14}/> : <Play size={14}/>} {playing ? "Pause" : "Play"}</button><button className="button button-outline" onClick={() => { seek(0); setPlaying(true); void backgroundVideo.current?.play(); void musicAudio.current?.play(); }}><RotateCcw size={14}/> Replay</button><span>{playhead.toFixed(1)} / {composition.duration}s</span><input aria-label="Timeline playhead" type="range" min="0" max={composition.duration} step="0.1" value={playhead} onChange={(event) => seek(Number(event.target.value))}/></div>
+      </div><div className="mood-preview-controls"><button className="button button-outline" onClick={() => void togglePreview()}>{playing ? <X size={14}/> : <Play size={14}/>} {playing ? "Pause" : "Play"}</button><button className="button button-outline" onClick={() => { seek(0); setPlaying(true); void backgroundVideo.current?.play(); startMusicPreview(0); }}><RotateCcw size={14}/> Replay</button><span>{playhead.toFixed(1)} / {composition.duration}s</span><input aria-label="Timeline playhead" type="range" min="0" max={composition.duration} step="0.1" value={playhead} onChange={(event) => seek(Number(event.target.value))}/></div>
       </div>
       <div className="mood-render-options"><label className="field"><span>Resolusi export</span><select value={composition.resolution} onChange={(event) => updateComposition("resolution", event.target.value as Composition["resolution"])}><option value="720">720 × 1280 · default</option><option value="1080">1080 × 1920</option></select></label><label className="field"><span>Durasi output · {composition.duration}s</span><input type="range" min="5" max="40" step="1" value={composition.duration} onChange={(event) => updateDuration(Number(event.target.value))}/></label><p>30 FPS · H.264/AAC · MP4. Render tidak memanggil AI, Whisper, atau Ollama.</p></div>
       {job && <div className={`job-progress ${job.status === "failed" ? "job-failed" : ""}`}><div className="job-progress-top"><span className="job-progress-icon">{isRunning ? <LoaderCircle size={17} className="spin"/> : job.status === "completed" ? <CheckCircle2 size={17}/> : <AlertCircle size={17}/>}</span><div><strong>{job.status === "completed" ? "Render selesai" : job.status === "failed" ? "Render gagal" : job.status === "cancelled" ? "Render dibatalkan" : job.phase === "rendering" ? "FFmpeg merender video" : "Menunggu render"}</strong><span>{job.message}</span></div>{isRunning && <button className="button button-quiet" onClick={() => void cancel()}>Batalkan</button>}{["failed", "cancelled"].includes(job.status) && <button className="button button-quiet" onClick={() => void retry()}>Coba lagi</button>}</div>{job.progress !== null && isRunning && <div className="progress-track"><span style={{ width: `${Math.round(job.progress * 100)}%` }}/></div>}</div>}

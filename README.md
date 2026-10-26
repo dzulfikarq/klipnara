@@ -43,8 +43,9 @@ Requirements: Windows 10/11, Python 3.10+, Node.js 20.9+, FFmpeg/ffprobe. Whispe
 - Quick Clip from user-selected timestamps, including sources without audio; no Whisper, Ollama, or cloud calls.
 - Optional AI Smart Clip with local whisper.cpp/Ollama or OpenAI/Gemini highlight analysis using explicit consent.
 - AI Mood Quotes: 8 configurable mood groups, 5 schema-validated alternatives per cloud request, favorites/history, resumable local drafts, legacy Single Text and Sequential Text, semantic local segmentation, and editable timed segments.
+- Mood Quotes V2.4 source: collapsible text/background/music timeline, draggable text timing and music offset, segment properties/split/merge/duplicate/reorder, playhead/snap/zoom, and timeline-synced browser audio. Timeline edits share `composition_json`; no parallel timeline state or SQLite migration.
 - Mood Quotes: 10 Smart Cinematic Presets, deterministic mood recommendations, adaptive typography, slow zoom/pan/Ken Burns, color grading, vignette, grain, and gradient/dark overlays. Presets preserve quote, manual timing, selected media background, and music; solid/gradient palettes follow preset.
-- Mood Quotes Live/Full Preview and the existing FFmpeg renderer share saved settings. Render jobs retain cancel/retry/progress, audio signal checks, 9:16 H.264/AAC MP4, review fingerprint, Clip Library listing, and download.
+- Mood Quotes Live/Full Preview and existing FFmpeg renderer consume one composition snapshot, including music offset/mute/trim/fades. Render jobs retain cancel/retry/progress, audio signal checks, 9:16 H.264/AAC MP4, review fingerprint, Clip Library listing, and download.
 - Token-bounded transcript chunking, SQLite chunk checkpoints, candidate validation/deduplication and global ranking.
 - Portrait FFmpeg H.264/AAC render, trim, center/manual crop and editable ASS subtitles.
 - Separate clip review/render states with approval bound to final MP4 SHA-256.
@@ -87,6 +88,8 @@ From `frontend`:
 npm run typecheck
 npm run build
 ```
+
+Frontend timeline regression code is in `frontend/lib/mood-timeline.test.mjs`; run from `frontend` with `node --test lib/mood-timeline.test.mjs`. V2.4 tests and runtime/browser/render QA remain unrun in this checkout; see [Testing and Troubleshooting](docs/testing-and-troubleshooting.md).
 
 Optional real-media Quick Clip check with isolated DB/output roots (defaults to 14:00–15:00; pass a suitable source and a new/empty output folder):
 

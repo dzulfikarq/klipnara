@@ -32,7 +32,7 @@ def _composition(background, music=None):
         "resolution": "720", "fps": 30, "duration": 4,
         "background": {"kind": background, "asset_id": None, "color": "#192c38", "color2": "#8d536d",
                        "video_start": 0, "loop": True, "mute_audio": background != "video", "audio_volume": 0.15},
-        "music": {"asset_id": music, "trim_start": 0, "trim_end": 2, "volume": 0.2, "fade_in": 0.3, "fade_out": 0.5, "loop": True},
+        "music": {"asset_id": music, "offset": 0, "trim_start": 0, "trim_end": 2, "volume": 0.2, "fade_in": 0.3, "fade_out": 0.5, "loop": True, "muted": False},
         "text": {"text": "Bahagia {sederhana}, café.\nHari ini.", "font": "Georgia", "font_size": 38,
                   "color": "#ffffff", "alignment": "center", "x": 50, "y": 53, "line_spacing": 1.3,
                   "shadow": True, "outline": False, "opacity": 96, "start": 0.2, "end": 3.8,
@@ -88,6 +88,10 @@ def main():
     music_only["music"].update({"trim_start": 0.25, "trim_end": 1.75})
     music_nonloop = _composition("solid", "music")
     music_nonloop["music"].update({"loop": False, "trim_start": 0.25, "trim_end": 1.75, "fade_out": 0.4})
+    music_offset = _composition("solid", "music")
+    music_offset["music"].update({"offset": 1.25, "loop": False, "trim_start": 0.25, "trim_end": 1.75, "fade_in": 0.2, "fade_out": 0.3})
+    music_muted = _composition("solid", "music")
+    music_muted["music"].update({"muted": True})
     cinematic_video = _composition("video", "music")
     cinematic_video["visual"].update({"motion": "ken_burns", "motion_intensity": "subtle", "brightness": -0.06,
                                        "contrast": 1.1, "saturation": 0.82, "temperature": 0.25, "vignette": 0.35,
@@ -100,6 +104,8 @@ def main():
         ("background-audio-only", _composition("video"), {"video": assets["video"]}),
         ("music-only-resample-loop-trim-fades", music_only, {"music": assets["music"]}),
         ("music-shorter-than-video-no-loop-fade", music_nonloop, {"music": assets["music"]}),
+        ("music-offset-trim-fades", music_offset, {"music": assets["music"]}),
+        ("selected-music-muted-silent-aac", music_muted, {"music": assets["music"]}),
         ("music-volume-zero-explicit-silence", {**_composition("solid", "music"), "music": {**_composition("solid", "music")["music"], "volume": 0}}, {"music": assets["music"]}),
         ("muted-background-silent-aac", {**_composition("video"), "background": {**_composition("video")["background"], "mute_audio": True}}, {"video": assets["video"]}),
         ("background-audio-volume-zero-silent-aac", {**_composition("video"), "background": {**_composition("video")["background"], "audio_volume": 0}}, {"video": assets["video"]}),
@@ -165,7 +171,7 @@ def main():
         assert abs(metadata["duration"] - 4) < 0.2, metadata
         assert progress and output.stat().st_size > 0
         output_mean = _audio_mean_volume(ffmpeg, output, 0, 4)
-        if composition["music"].get("asset_id") and composition["music"]["volume"] > 0 or any(item.get("has_audio") for item in selected_assets.values()) and not composition["background"].get("mute_audio") and composition["background"]["audio_volume"] > 0:
+        if composition["music"].get("asset_id") and not composition["music"].get("muted", False) and composition["music"]["volume"] > 0 or any(item.get("has_audio") for item in selected_assets.values()) and not composition["background"].get("mute_audio") and composition["background"]["audio_volume"] > 0:
             assert math.isfinite(output_mean) and output_mean > -90, (name, output_mean)
         else:
             assert not math.isfinite(output_mean) or output_mean <= -90, (name, output_mean)

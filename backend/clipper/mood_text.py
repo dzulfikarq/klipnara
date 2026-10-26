@@ -9,7 +9,8 @@ _WORD = re.compile(r"[^\W_]+(?:['’][^\W_]+)*", re.UNICODE)
 _CONNECTORS = {
     "agar", "although", "and", "after", "before", "because", "but", "dan", "karena", "ketika", "atau",
     "lalu", "meski", "namun", "saat", "sebelum", "setelah", "supaya", "tapi", "then", "while", "yet",
-    "tetapi", "sehingga", "walaupun",
+    "tetapi", "sehingga", "walaupun", "bila", "jika", "hingga", "sambil", "seperti", "meskipun",
+    "seolah", "walau", "ketimbang", "daripada",
 }
 _DISCOURSE_OPENERS = {"terkadang", "kadang", "sesekali", "namun", "tetapi", "meski", "walau", "walaupun", "karena", "sehingga", "bahkan"}
 _ALL_CONNECTORS = _CONNECTORS | _DISCOURSE_OPENERS
@@ -65,12 +66,17 @@ def _semantic_parts(text, max_segments):
             if pending:
                 clause = " ".join((*pending, clause))
                 pending.clear()
+            elif first_word in _ALL_CONNECTORS and merged_clauses:
+                merged_clauses[-1] = f"{merged_clauses[-1]} {clause}".strip()
+                continue
             if word_count(clause) < 3 and merged_clauses:
                 merged_clauses[-1] = f"{merged_clauses[-1]} {clause}".strip()
             else:
                 merged_clauses.append(clause)
         if pending and merged_clauses:
             merged_clauses[-1] = f"{merged_clauses[-1]} {' '.join(pending)}".strip()
+        elif pending and parts:
+            parts[-1] = f"{parts[-1]} {' '.join(pending)}".strip()
         elif pending:
             merged_clauses.extend(pending)
         for clause in merged_clauses:
@@ -129,7 +135,7 @@ def automatic_segments(text, duration, *, preferred=None, animation="fade_up", a
     # Longer phrases receive more room; punctuation adds a small reading pause.
     weights = [max(1.0, word_count(part) / 2.8 + min(1.0, len(re.findall(r"[,;:.!?…]", part)) * 0.12)) for part in parts]
     total_weight = sum(weights)
-    minimum_span = 0.2
+    minimum_span = 0.5
     available = float(duration) - minimum_span * len(parts)
     cursor = 0.0
     output = []

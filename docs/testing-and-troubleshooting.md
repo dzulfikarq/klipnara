@@ -20,6 +20,12 @@ npm run typecheck
 npm run build
 ```
 
+Timeline helper regression code, from `frontend`:
+
+```powershell
+node --test lib/mood-timeline.test.mjs
+```
+
 `frontend/package.json` defines no browser E2E or test-runner script. Browser workflows have not been validated by automated E2E in this repository.
 
 ## What checks cover
@@ -27,12 +33,13 @@ npm run build
 - `test_core.py`: strict candidate parsing/deduplication, timestamp chunk/token bounds, rank parsing, prompt/schema/context configuration, language flag, transcription cache fingerprint, local provider preflight, URL SSRF address checks and ASS subtitle output.
 - `test_api.py`: FastAPI validation, cloud consent persistence, retry checkpoint copy, source/clip routes, approval guard/codecs, no approval during render, changed-edit invalidation and render reset.
 - `test_quick_clip.py`: timestamp bounds, silent source acceptance, AI Smart Clip rejection without audio, Quick Clip worker AI-call isolation, review/subtitle gates, cancellation/retry, and FFmpeg silent-AAC command construction. FFmpeg execution is mocked by this automated test.
-- `test_mood_quotes.py`: category/config and 10-preset schema, deterministic recommendations, preset field preservation, old-draft defaults, visual JSON reload, Indonesian semantic segmentation, bounded filtergraph/portrait output, safe text margins, effect validation, per-request consent/provider behavior, five-quote schema/similarity, malformed output, regeneration/favorites, assets, jobs, review, and additive schema/data preservation. AI provider and FFmpeg job execution are mocked.
+- `test_mood_quotes.py`: category/config and 10-preset schema, deterministic recommendations, preset field preservation, old-draft music defaults, visual JSON reload, Indonesian semantic segmentation, music timing/snapshot validation, bounded filtergraph/portrait output, safe text margins, effect validation, per-request consent/provider behavior, five-quote schema/similarity, malformed output, regeneration/favorites, assets, jobs, review, and additive schema/data preservation. AI provider and FFmpeg job execution are mocked.
+- `lib/mood-timeline.test.mjs`: timeline pointer mapping/snapping, non-ripple segment moves/resizes, split/merge/duplicate/reset, Indonesian semantic split rules, music offset/trim/loop span, and serialized draft-save ordering/recovery.
 - `test_youtube.py`: DPAPI encrypt/decrypt round-trip; state cookie/state one-use logic and OAuth callback with mocked token/channel response; account status/disconnect; expired refresh token; approval/fingerprint/format/aspect/duration gate; manually entered metadata/default Private; resumable chunk acknowledgement after simulated connection loss; retry endpoint resumes known offset; duplicate prevention; cancel before upload; unknown session expiry fails closed.
 - `test_gemini_live.py`: opt-in, exactly one actual Gemini request using synthetic timestamped text only; requires a configured Free Tier key and does not send media.
 - `run_real_pipeline.py`: opt-in actual local API/worker/render test using an owned/licensed video and installed FFmpeg/ffprobe/Whisper/Ollama. Required `--video`, `--output-dir`; optional `--long-video`, `--timeout`. It exercises local pipeline failures/retry, renders, cancellation, and optional long-source handling. It is not run by the default scripts.
 - `run_quick_clip_e2e.py`: opt-in real-media Quick Clip API/worker/FFmpeg test. It points to an existing source, uses isolated DB/output roots, disables Whisper/Ollama/cloud configuration, leaves source untouched, and reports rendered duration/codecs, elapsed time, sampled process-tree RSS and system CPU. Accepts `--video`, `--start`, `--end`, `--resolution`, and `--output-dir`.
-- `run_mood_render_e2e.py`: local synthetic FFmpeg E2E for legacy backgrounds/audio plus Ken Burns/color/overlay video and pan/still-image cases, silent AAC, Unicode text/ASS animation, progress, codecs/resolution/duration. It makes no AI/network calls and uses no user media. V2.3 cases were added but not executed.
+- `run_mood_render_e2e.py`: local synthetic FFmpeg E2E for legacy backgrounds/audio plus Ken Burns/color/overlay video and pan/still-image cases, silent AAC, Unicode text/ASS animation, music offset/mute/trim/fade, progress, codecs/resolution/duration. It makes no AI/network calls and uses no user media. V2.4 cases were added but not executed.
 
 ### Verification categories
 
@@ -48,7 +55,8 @@ npm run build
 | Root dev-runner smoke | Backend `/api/health` returned 200; frontend returned 200 at 3011 with `PORT=3011`. Default port 3000 was occupied by another local app, so the exact 3000 URL was not independently verified in this environment |
 | Mood Quotes provider tests | Automated provider mocks and negative cases pass; live Gemini/OpenAI Mood Quotes request and current provider quota are not verified by synthetic render E2E |
 | Mood Quotes FFmpeg synthetic E2E | Four actual local renders; details below. No 1080p/AMF run or browser preview parity test |
-| Step 3 live preview visual check | Not run for this two-column UI revision per workspace instruction. Thumbnail cache is covered by Mood API test; follow manual checklist below |
+| V2.4 source checks | Frontend helper tests, backend regression assertions, and offset/mute synthetic-render cases added; **none run** in this checkout. No typecheck/build/server/browser/FFmpeg validation performed. |
+| Step 3 live preview visual check | Not run for V2.3 two-column UI revision per workspace instruction. Thumbnail cache is covered by Mood API test; V2.4 timeline/audio changes also need manual QA below |
 | V2.3 cinematic/segmentation additions | Test code updated; **not run**. No V2.3 build, runtime, browser, or FFmpeg validation was performed in this checkout |
 
 Other not-run cases recorded in the repository audit: 10-minute varied-content source, OpenAI live call, Gemini 3.6 live call, actual Gemini 429 response, human review of every subtitle, and 1080p across varied source videos. A prior five-minute long-source fixture repeated a 2.5-minute speech segment twice, so semantic variety at that duration remains unverified.
@@ -85,7 +93,7 @@ Actual FFmpeg/ffprobe runs on the local Windows workstation used only generated 
 
 These short synthetic samples validate command/media paths only. They do not measure longer user footage, subjective font/animation quality, 1080p, AMF, browser-vs-render parity, or AI text quality.
 
-The E2E script also includes sequential Unicode text, music trim/loop/fades, mono 44.1 kHz resampling, no-loop short music, background-only audio, muted/zero-volume silence, corrupt/silent selected audio, output signal checks, and V2.3 synthetic motion/color/overlay cases. These new scenarios have **not been run in this checkout**; historical results above cover only their listed cases. To run manually:
+The E2E script also includes sequential Unicode text, music trim/loop/fades, offset delay, muted music, mono 44.1 kHz resampling, no-loop short music, background-only audio, zero-volume silence, corrupt/silent selected audio, output signal checks, and V2.3 synthetic motion/color/overlay cases. These new scenarios have **not been run in this checkout**; historical results above cover only their listed cases. To run manually:
 
 ```powershell
 .venv\Scripts\python.exe tests\run_mood_render_e2e.py
@@ -96,15 +104,16 @@ Do not interpret mocked YouTube success as a real platform upload. Before accoun
 ### Manual Mood Quotes sequence/audio/render check
 
 0. In Clip Library, select **Edit draft** on an existing Mood Quotes row; confirm its `?id=` draft opens without increasing the project count. Use **Hapus** only on a selected duplicate and confirm the dialog removes only that draft.
-1. Open an old draft without `text_mode`; confirm it loads as **Single Text** with prior timing/appearance. Create a new draft; confirm **Sequential Text** default and no SQLite migration/data loss.
+1. Open an old draft without `text_mode`, `music.offset`, or `music.muted`; confirm it loads as **Single Text**, offset `0`, unmuted, with prior timing/appearance. Create a new draft; confirm **Sequential Text** default and no SQLite migration/data loss.
 2. Select Indonesian quotes starting with “Terkadang,” and with comma/semicolon conjunctions. Confirm no hanging one-word opener, punctuation/text reconstruction, reasonable reading time, and warning for very long text/short duration. Edit a segment manually, press **Segmentasi ulang**, cancel confirmation and verify text/timing survive; confirm then verify only explicit reset replaces them. No AI request.
 3. Choose Bahagia and Romantis moods; inspect **Direkomendasikan** vs **Preset lainnya**. Apply Happy Sunshine, Sad Night, Romantic Dream, Vintage Memories. Confirm visible effect variation. Change typography manually, apply another preset, use Undo and Reset Visual Style; quote/segments/timing/media assets/music must remain. Solid/gradient palette changes on preset apply and returns to defaults on reset.
 4. Use image/video background and test all motion directions, Ken Burns, three intensities, and None. Scrub Live Preview; confirm crop has no black edges. Video thumb should remain a labeled static frame while its transform simulates motion; Preview Penuh should play actual video. Color grade, temp, vignette, grain, dark and gradient overlays should update without AI calls.
 5. Change text font/weight/size/color/alignment/position/line spacing/opacity, Auto Contrast, text gradient, and segment animation. Check safe-margin warning, 720p and 1080p layouts, and narrow desktop width.
-6. Compare **Editor Live Preview → Preview Penuh → MP4 final** at same playhead/segment. Verify motion direction/speed, grading/overlay, typography, text animation/timing, crop, H.264/AAC, duration/resolution. Small CSS/libass/color/grain differences are expected; log any material mismatch.
-7. Test music trim/loop/fades/volume, background audio on/off/zero, no music, and silent/corrupt selected audio. No selection or zero volume may produce silent AAC; selected active silent/corrupt audio should fail clearly. Confirm visual presets never select music or external assets.
-8. Approve output, mark **Perlu revisi**, edit composition, rerender, and confirm approval fingerprint invalidates while old render stays available. Download final MP4; reopen draft and confirm visual settings, quote/assets/history, manual segments, music, and legacy Single Text persist.
-9. Run existing Quick Clip, AI Smart Clip, review, and YouTube mocked regression suites separately; confirm their forms/routes/render/publishing behavior did not change. Confirm edit/preview/render never call AI.
+6. In Visual Timeline Editor, seek on ruler/tracks, zoom, toggle snap, drag/resize segments, and confirm neighbors do not ripple. Exercise split/merge/duplicate/reorder/reset, keyboard timing fields, selection/playhead sync, and autosave; test narrow viewport and collapse/expand panel.
+7. Set nonzero music offset, drag music clip, seek before/after offset, and compare Live Preview, Preview Penuh, and rendered audio. Test trim/loop/fades/volume/mute, background audio on/off/zero, no music, and silent/corrupt selected audio. No selection, mute, or zero volume may produce silent AAC; selected active silent/corrupt audio should fail clearly. Confirm visual presets never select music or external assets.
+8. Compare **Editor Live Preview → Preview Penuh → MP4 final** at same playhead/segment. Verify motion direction/speed, grading/overlay, typography, text animation/timing, crop, H.264/AAC, duration/resolution. Small CSS/libass/color/grain differences are expected; log any material mismatch.
+9. Approve output, mark **Perlu revisi**, edit composition, rerender, and confirm approval fingerprint invalidates while old render stays available. Download final MP4; reopen draft and confirm visual settings, quote/assets/history, manual segments, offset/mute, and legacy Single Text persist.
+10. Run existing Quick Clip, AI Smart Clip, review, and YouTube mocked regression suites separately; confirm their forms/routes/render/publishing behavior did not change. Confirm edit/preview/render never call AI.
 
 ## Troubleshooting
 

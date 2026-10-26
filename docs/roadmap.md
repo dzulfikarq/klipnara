@@ -31,6 +31,14 @@ Roadmap captures latest product direction, not a claim that planned code already
 | Indonesian semantic segmentation | **Implemented in source; tests not run** | Deterministic clause merge/split rules avoid hanging openers/connectors; manual segments require explicit confirmed re-segmentation. Old Single Text drafts remain supported. |
 | V2.3 QA | **Pending user runtime check** | Regression and synthetic-render test code added/updated but not executed. Compare Live Preview, Preview Penuh, and MP4; no build/server/browser/FFmpeg run was performed for this update. |
 
+## V2.4 Mood Quotes visual timeline phase
+
+| Phase | State | Scope/status |
+|---|---|---|
+| Composition timeline | **Implemented in source; validation pending** | Collapsible text/background/music lanes, shared playhead, zoom/snap, drag/resize, music offset/mute, segment split/merge/duplicate/reorder/reset. Selection/zoom/snap stay UI-only; edits use existing composition JSON. |
+| Audio timing and draft safety | **Implemented in source; validation pending** | Backward-compatible offset/mute defaults, asset/span validation, delayed/faded FFmpeg music, preview sync, serialized autosave, immutable render snapshot. No SQLite migration. |
+| Regression and manual QA | **Pending** | Frontend helper tests, backend assertions, synthetic offset/mute render cases, and manual checklist added; none run. No typecheck/build/browser/FFmpeg runtime validation performed. |
+
 ## V2.0 phase status
 
 | Phase | State | Scope/status |
@@ -45,7 +53,7 @@ Roadmap captures latest product direction, not a claim that planned code already
 
 | Area | Current source status | Direction |
 |---|---|---|
-| AI Mood Quotes | **V2.3 source implementation; runtime/tests pending** for consented generation, deterministic segmentation, cinematic presets/effects, local FFmpeg composition. No V2.3 test/build/live AI/browser/FFmpeg run was performed. | Follow V2.3 manual QA; measure effects on target hardware and validate preview/render parity before calling verified. |
+| AI Mood Quotes | **V2.4 source implementation; runtime/tests pending** for consented generation, deterministic segmentation, cinematic presets/effects, visual timeline, audio offset/mute, local FFmpeg composition. No V2.4 test/build/live AI/browser/FFmpeg run was performed. | Follow V2.4 manual QA; measure effects on target hardware and validate timeline/audio preview-render parity before calling verified. |
 | Quick Clip by timestamp | **Implemented.** Current Create default; accepts `MM:SS`/`HH:MM:SS`, creates clip/job without transcript/candidate/AI, renders selected interval, supports sources without audio. | Keep primary, lightweight path; Fase 2 may optimize FFmpeg latency later. |
 | Whisper transcription | **Implemented; used for fresh sources/cache misses** in AI Smart Clip. Local whisper.cpp, `small` recommended, `base` fallback, language auto/Indonesian/English. | Optional for the product's primary Quick Clip flow; retain for AI Smart Clip. |
 | Ollama highlight analysis | **Implemented, default** local provider for AI Smart Clip; OpenAI/Gemini can replace it with explicit consent. | Optional for the product's primary Quick Clip flow. |
@@ -57,7 +65,7 @@ Roadmap captures latest product direction, not a claim that planned code already
 
 ## Suggested next sequence
 
-1. Run V2.3 Mood Quotes manual QA on target hardware; compare Live Preview, Preview Penuh, and MP4 across presets/effects, then execute automated tests only with user authorization. Validate live Gemini/OpenAI separately with explicit consent and quota checks.
+1. Run V2.4 Mood Quotes manual QA on target hardware; test timeline interactions and offset/mute audio, compare Live Preview, Preview Penuh, and MP4, then execute automated tests only with user authorization. Validate live Gemini/OpenAI separately with explicit consent and quota checks.
 2. Decide whether to add a source-less YouTube publishing adapter for Mood render records without changing existing clip approval/upload invariants.
 3. Keep YouTube Clip URL import disabled until a rights-aware and secure supported ingest approach is scoped; do not add an arbitrary downloader.
 4. Configure a real personal YouTube OAuth client, complete one Private upload, and verify channel/video ID/privacy/processing in YouTube Studio for existing clip outputs.

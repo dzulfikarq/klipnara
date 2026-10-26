@@ -9,13 +9,13 @@ function formatErrorDetail(detail: unknown): string {
   if (typeof detail === "string") return detail;
   if (Array.isArray(detail)) {
     const issues = detail.filter((item): item is { loc?: unknown[]; msg?: unknown; type?: unknown } => Boolean(item) && typeof item === "object");
-    const moodFields = new Set(["text_mode", "segments", "segments_source", "gradient_opacity", "auto_contrast", "font_weight", "visual"]);
+    const moodFields = new Set(["text_mode", "segments", "segments_source", "gradient_opacity", "auto_contrast", "font_weight", "visual", "offset", "muted"]);
     const staleMoodSchema = issues.some((issue) => Array.isArray(issue.loc)
       && issue.type === "extra_forbidden"
       && issue.loc.includes("composition")
       && issue.loc.some((part) => moodFields.has(String(part))));
     if (staleMoodSchema) {
-      return "Backend AI Mood Quotes belum memakai schema V2.3 (font_weight/visual). Restart backend dari workspace terbaru, lalu muat ulang halaman.";
+      return "Backend AI Mood Quotes memakai schema lama. Restart backend dari workspace terbaru, lalu muat ulang halaman.";
     }
     const messages = issues.map((issue) => {
       const location = Array.isArray(issue.loc) ? issue.loc.filter((part) => part !== "body").join(".") : "";

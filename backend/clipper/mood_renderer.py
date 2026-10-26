@@ -41,15 +41,16 @@ def _quote_layout(text, composition, width, height):
     center_x = round(width * settings["x"] / 100)
     center_y = round(height * settings["y"] / 100)
     box_width = round(min(width * 0.82, center_x * 2, (width - center_x) * 2))
-    minimum_size = max(18, round(requested_size * 0.72))
+    minimum_size = max(round(20 * width / 720), round(requested_size * 0.72))
     font_size = requested_size
     while font_size >= minimum_size:
         lines = _wrap_quote(text, box_width, font_size)
         line_height = round(font_size * settings["line_spacing"])
         block_height = line_height * len(lines)
         top = center_y - block_height / 2
+        safe_margin = round(height * 0.05)
         widest_line = max((len(line) for line in lines), default=0)
-        if len(lines) <= 14 and box_width >= font_size and widest_line <= max(1, int(box_width / (font_size * 0.56))) and top >= 0 and top + block_height <= height:
+        if len(lines) <= 14 and box_width >= font_size and widest_line <= max(1, int(box_width / (font_size * 0.56))) and top >= safe_margin and top + block_height <= height - safe_margin:
             return lines, font_size, line_height, box_width, center_x, center_y
         font_size -= max(1, round(requested_size * 0.035))
     raise ValueError("Teks segmen tidak muat dalam safe margin. Pecah menjadi segmen lebih pendek, kurangi ukuran font sedikit, atau ubah posisi.")
@@ -386,7 +387,7 @@ def render_mood_video(*, render_id, quote, composition, assets, cancel, progress
         else:
             raise MediaError("Pilih background yang masih tersedia sebelum render.")
 
-        music_asset = assets.get(music.get("asset_id")) if music.get("asset_id") else None
+        music_asset = assets.get(music.get("asset_id")) if music.get("asset_id") and not music.get("muted", False) else None
         music_index = None
         music_source_has_signal = False
         background_source_has_signal = False
@@ -398,9 +399,15 @@ def render_mood_video(*, render_id, quote, composition, assets, cancel, progress
                 raise MediaError("Audio background video senyap pada segmen terpilih. Pilih segmen lain, mute audio background, atau gunakan musik.")
             background_source_has_signal = True
         if music_asset:
-            selected_duration = min(duration, max(0.05, music["trim_end"] - music["trim_start"]))
+            available_duration = max(0.0, duration - float(music.get("offset", 0)))
+            source_duration = min(
+                max(0.0, music["trim_end"] - music["trim_start"]),
+                max(0.0, music_asset["duration"] - music["trim_start"]),
+            )
+            if source_duration < 0.05:
+                raise MediaError("Trim musik harus menyisakan sedikitnya 0,05 detik audio.")
             if music["volume"] > 0:
-                source_mean = _audio_mean_volume(ffmpeg, music_asset["path"], music["trim_start"], selected_duration)
+                source_mean = _audio_mean_volume(ffmpeg, music_asset["path"], music["trim_start"], min(source_duration, available_duration))
                 if not math.isfinite(source_mean) or source_mean <= -90:
                     raise MediaError("File musik terpilih senyap pada rentang trim. Pilih file lain, ubah trim, atau pilih Tanpa musik.")
                 music_source_has_signal = True
@@ -440,28 +447,32 @@ def render_mood_video(*, render_id, quote, composition, assets, cancel, progress
                 f"apad,atrim=duration={duration:.3f}[bga]"
             )
         if music_asset:
-            fade_in, fade_out = music["fade_in"], music["fade_out"]
-            source_duration = max(0.05, music["trim_end"] - music["trim_start"])
-            music_duration = min(duration, source_duration)
-            music_play_duration = duration if music["loop"] else music_duration
-            if fade_in + fade_out > music_play_duration and fade_in + fade_out > 0:
-                fade_scale = music_play_duration / (fade_in + fade_out)
-                fade_in *= fade_scale
-                fade_out *= fade_scale
+            offset = float(music.get("offset", 0))
+            available_duration = max(0.0, duration - offset)
+            source_duration = min(
+                max(0.0, music["trim_end"] - music["trim_start"]),
+                max(0.0, music_asset["duration"] - music["trim_start"]),
+            )
+            if source_duration < 0.05:
+                raise MediaError("Trim musik harus menyisakan sedikitnya 0,05 detik audio.")
+            music_play_duration = available_duration if music["loop"] else min(available_duration, source_duration)
+            fade_in = min(float(music["fade_in"]), music_play_duration)
+            fade_out = min(float(music["fade_out"]), max(0.0, music_play_duration - fade_in))
             music_filter = (
                 f"[{music_index}:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
-                f"atrim=duration={music_duration:.3f},"
+                f"atrim=duration={source_duration:.3f},"
                 f"asetpts=PTS-STARTPTS,volume={music['volume']:.3f}"
             )
             if music["loop"]:
-                music_filter += f",aloop=loop=-1:size={max(1, round(music_duration * 48000))}"
+                music_filter += f",aloop=loop=-1:size={max(1, round(source_duration * 48000))}"
             else:
                 music_filter += ",apad"
-            music_filter += f",atrim=duration={duration:.3f}"
+            delay_ms = round(offset * 1000)
+            music_filter += f",adelay={delay_ms}|{delay_ms},atrim=duration={duration:.3f}"
             if fade_in:
-                music_filter += f",afade=t=in:st=0:d={fade_in:.3f}"
+                music_filter += f",afade=t=in:st={offset:.3f}:d={fade_in:.3f}"
             if fade_out:
-                music_filter += f",afade=t=out:st={max(0, music_play_duration - fade_out):.3f}:d={fade_out:.3f}"
+                music_filter += f",afade=t=out:st={max(offset, offset + music_play_duration - fade_out):.3f}:d={fade_out:.3f}"
             filters.append(music_filter + "[musa]")
         if has_video_audio and music_asset:
             filters.append("[bga][musa]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=0.95[aout]")

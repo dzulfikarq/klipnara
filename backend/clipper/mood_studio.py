@@ -14,10 +14,11 @@ from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from .config import CLIP_DIR, DATA_DIR, LEGACY_CLIP_DIR, LEGACY_SOURCE_DIR, MIN_FREE_BYTES, MOOD_DIR, SOURCE_DIR, WORK_DIR
+from .config import ASSET_DIR, CLIP_DIR, DATA_DIR, LEGACY_CLIP_DIR, LEGACY_SOURCE_DIR, MIN_FREE_BYTES, MOOD_DIR, SOURCE_DIR, WORK_DIR
 from .db import connect
 from .jobs import now
 from .media import MediaError, executable, probe
+from .asset_library import register_local_upload
 from .mood_renderer import validate_quote_layout
 from .mood_text import automatic_segments
 from .mood_quotes import (
@@ -190,6 +191,10 @@ class MoodSourceRequest(StrictModel):
     source_id: str = Field(min_length=1, max_length=64)
 
 
+class MoodAssetRequest(StrictModel):
+    asset_id: str = Field(min_length=1, max_length=64)
+
+
 class MoodReviewRequest(StrictModel):
     status: Literal["approved", "needs_revision"]
 
@@ -224,6 +229,11 @@ def _safe_asset(row):
         if path.parent not in {SOURCE_DIR.resolve(), LEGACY_SOURCE_DIR.resolve()} or not path.is_file():
             raise HTTPException(404, "Video Source Library tidak ditemukan.")
         return path
+    if row.get("library_asset_id"):
+        if not (path == ASSET_DIR.resolve() or path.is_relative_to(ASSET_DIR.resolve())
+                or path.parent in {SOURCE_DIR.resolve(), LEGACY_SOURCE_DIR.resolve()}) or not path.is_file():
+            raise HTTPException(404, "Asset Library file tidak ditemukan.")
+        return path
     asset_dir = _project_asset_dir(row["project_id"])
     if path.parent != asset_dir or not path.is_file():
         raise HTTPException(404, "File aset lokal tidak ditemukan.")
@@ -235,6 +245,8 @@ def _asset_public(row):
     item.pop("path", None)
     item.pop("sha256", None)
     item["has_audio"] = bool(item["has_audio"])
+    if item.get("favorite") is not None:
+        item["favorite"] = bool(item["favorite"])
     item["url"] = f"/api/mood-assets/{item['id']}/file"
     return item
 
@@ -257,7 +269,12 @@ def _detail(project_id, *, full=True):
             raise HTTPException(404, "Mood Quotes draft tidak ditemukan.")
         project = dict(row)
         current = conn.execute("SELECT * FROM mood_renders WHERE id=?", (project["current_render_id"],)).fetchone() if project["current_render_id"] else None
-        assets = conn.execute("SELECT * FROM mood_assets WHERE project_id=? ORDER BY created_at DESC", (project_id,)).fetchall()
+        assets = conn.execute(
+            "SELECT a.*,l.source AS asset_source,l.provider_asset_id,l.source_url,l.creator_name,l.creator_url,"
+            "l.license_reference,l.license_type,l.license_notes,l.attribution_text,l.favorite AS favorite "
+            "FROM mood_assets a LEFT JOIN library_assets l ON l.id=a.library_asset_id OR l.source_id=a.source_id "
+            "WHERE a.project_id=? ORDER BY a.created_at DESC", (project_id,),
+        ).fetchall()
         latest_job = conn.execute("SELECT id,status,phase,progress,message FROM mood_jobs WHERE project_id=? ORDER BY created_at DESC LIMIT 1", (project_id,)).fetchone()
         result = {
             "project": {
@@ -516,6 +533,14 @@ def update_mood_project(project_id: str, body: MoodProjectPatch):
             project = conn.execute("SELECT * FROM mood_projects WHERE id=?", (project_id,)).fetchone()
             if project is None:
                 raise HTTPException(404, "Mood Quotes draft tidak ditemukan.")
+            batch_item = conn.execute(
+                "SELECT i.id,i.batch_id,i.status,i.job_id,b.status AS batch_status FROM video_batch_items i "
+                "JOIN video_batches b ON b.id=i.batch_id WHERE i.mood_project_id=?",
+                (project_id,),
+            ).fetchone()
+            paused_pending = batch_item and batch_item["status"] == "queued" and batch_item["batch_status"] == "paused" and batch_item["job_id"] is None
+            if batch_item and batch_item["status"] in {"queued", "rendering"} and not paused_pending:
+                raise HTTPException(409, "Item is queued in a batch. Pause or wait before editing.")
             if conn.execute("SELECT 1 FROM mood_jobs WHERE project_id=? AND status IN ('queued','preparing','rendering')", (project_id,)).fetchone():
                 raise HTTPException(409, "Simpan perubahan setelah render aktif selesai atau dibatalkan.")
             next_fields = {key: project[key] for key in ("category_id", "subcategory_id", "tone", "perspective", "length", "language")}
@@ -528,6 +553,14 @@ def update_mood_project(project_id: str, body: MoodProjectPatch):
             conn.execute(f"UPDATE mood_projects SET {','.join(fields)},updated_at=? WHERE id=?", [*values, now(), project_id])
             if render_changed:
                 conn.execute("UPDATE mood_renders SET status='needs_render',review_status='needs_review',reviewed_render_sha256=NULL WHERE id=? AND status='completed'", (project["current_render_id"],))
+                if batch_item:
+                    conn.execute(
+                        "UPDATE video_batch_items SET custom_override=1,status=CASE WHEN status IN ('completed','failed','cancelled') THEN 'ready' ELSE status END,"
+                        "error=NULL,updated_at=? WHERE id=?",
+                        (now(), batch_item["id"]),
+                    )
+                    if batch_item["batch_status"] in {"completed", "completed_with_errors", "failed", "cancelled"}:
+                        conn.execute("UPDATE video_batches SET status='ready',error=NULL,updated_at=? WHERE id=?", (now(), batch_item["batch_id"]))
     return _detail(project_id)
 
 
@@ -604,45 +637,44 @@ def delete_mood_favorite(project_id: str, favorite_id: str):
 @router.post("/mood-projects/{project_id}/assets")
 def upload_mood_asset(project_id: str, kind: Literal["background_image", "background_video", "music"] = Form(...), file: UploadFile = File(...)):
     _project_row(project_id)
-    suffix = Path((file.filename or "").replace("\\", "/")).suffix.lower()
-    allowed = _IMAGE_EXTENSIONS if kind == "background_image" else _VIDEO_EXTENSIONS if kind == "background_video" else _AUDIO_EXTENSIONS
-    if suffix not in allowed:
-        extensions = ", ".join(allowed)
-        raise HTTPException(415, f"Format {kind} tidak didukung. Gunakan {extensions}.")
-    asset_id, timestamp = uuid.uuid4().hex, now()
-    asset_dir = _project_asset_dir(project_id)
-    path = asset_dir / f"{asset_id}{suffix}"
-    digest, size = hashlib.sha256(), 0
-    try:
-        with path.open("xb") as output:
-            while block := file.file.read(1024 * 1024):
-                size += len(block)
-                if size > _MAX_ASSET_BYTES[kind]:
-                    raise HTTPException(413, "Aset melebihi batas ukuran untuk jenis file ini.")
-                if min(shutil.disk_usage(folder).free for folder in {DATA_DIR, MOOD_DIR, WORK_DIR, CLIP_DIR}) < MIN_FREE_BYTES + len(block):
-                    raise HTTPException(507, "Sisakan minimal 1 GiB ruang kosong untuk file sementara dan render.")
-                digest.update(block)
-                output.write(block)
-        if not size:
-            raise HTTPException(400, "File yang diunggah kosong.")
-        metadata = _probe_asset(path, kind)
-        with connect() as conn:
-            conn.execute(
-                "INSERT INTO mood_assets(id,project_id,kind,name,path,mime_type,size_bytes,duration,width,height,has_audio,sha256,created_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (asset_id, project_id, kind, Path((file.filename or "asset").replace("\\", "/")).name[:120], str(path.resolve()),
-                 allowed[suffix], size, metadata["duration"], metadata["width"], metadata["height"], int(metadata["has_audio"]), digest.hexdigest(), timestamp),
-            )
-            conn.execute("UPDATE mood_projects SET updated_at=? WHERE id=?", (timestamp, project_id))
-    except HTTPException:
-        path.unlink(missing_ok=True)
-        raise
-    except Exception:
-        path.unlink(missing_ok=True)
-        raise
+    global_kind = {"background_image": "image", "background_video": "video", "music": "audio"}[kind]
+    shared = register_local_upload(file, global_kind)
     with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        canonical = conn.execute("SELECT * FROM library_assets WHERE id=?", (shared["id"],)).fetchone()
+        if canonical is None:
+            raise HTTPException(500, "Asset tersimpan tanpa metadata library.")
+        existing = conn.execute(
+            "SELECT * FROM mood_assets WHERE project_id=? AND ((? IS NOT NULL AND source_id=?) OR library_asset_id=?) LIMIT 1",
+            (project_id, canonical["source_id"], canonical["source_id"], canonical["id"]),
+        ).fetchone()
+        if existing:
+            return _asset_public(dict(existing) | {
+                "asset_source": canonical["source"], "source_url": canonical["source_url"],
+                "creator_name": canonical["creator_name"], "license_reference": canonical["license_reference"],
+                "license_type": canonical["license_type"], "attribution_text": canonical["attribution_text"],
+            })
+        asset_id, timestamp = uuid.uuid4().hex, now()
+        has_audio = global_kind == "audio"
+        if global_kind == "video" and canonical["source_id"]:
+            audio = conn.execute("SELECT audio_codec FROM sources WHERE id=?", (canonical["source_id"],)).fetchone()
+            has_audio = bool(audio and audio["audio_codec"])
+        conn.execute(
+            "INSERT INTO mood_assets(id,project_id,source_id,library_asset_id,kind,name,path,mime_type,size_bytes,duration,width,height,has_audio,sha256,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (asset_id, project_id, canonical["source_id"], canonical["id"], kind, canonical["title"], canonical["path"],
+             canonical["mime_type"], canonical["size_bytes"], canonical["duration"], canonical["width"], canonical["height"],
+             int(has_audio),
+             canonical["sha256"], timestamp),
+        )
+        conn.execute("UPDATE mood_projects SET updated_at=? WHERE id=?", (timestamp, project_id))
+        conn.execute("UPDATE library_assets SET last_used_at=? WHERE id=?", (timestamp, canonical["id"]))
         row = conn.execute("SELECT * FROM mood_assets WHERE id=?", (asset_id,)).fetchone()
-    return _asset_public(dict(row))
+    return _asset_public(dict(row) | {
+        "asset_source": canonical["source"], "source_url": canonical["source_url"],
+        "creator_name": canonical["creator_name"], "license_reference": canonical["license_reference"],
+        "license_type": canonical["license_type"], "attribution_text": canonical["attribution_text"],
+    })
 
 
 @router.get("/mood-assets/{asset_id}/file")
@@ -703,7 +735,13 @@ def attach_source_asset(project_id: str, body: MoodSourceRequest):
             raise HTTPException(404, "Video Source Library tidak ditemukan.")
         existing = conn.execute("SELECT * FROM mood_assets WHERE project_id=? AND source_id=?", (project_id, body.source_id)).fetchone()
         if existing:
-            return _asset_public(dict(existing))
+            library = conn.execute("SELECT * FROM library_assets WHERE source_id=?", (body.source_id,)).fetchone()
+            return _asset_public(dict(existing) | ({
+                "asset_source": library["source"], "source_url": library["source_url"],
+                "creator_name": library["creator_name"], "creator_url": library["creator_url"],
+                "license_reference": library["license_reference"], "license_type": library["license_type"],
+                "attribution_text": library["attribution_text"],
+            } if library else {}))
         source = dict(source)
         path = Path(source["path"]).resolve()
         if path.parent not in {SOURCE_DIR.resolve(), LEGACY_SOURCE_DIR.resolve()} or not path.is_file():
@@ -717,8 +755,68 @@ def attach_source_asset(project_id: str, body: MoodSourceRequest):
              source["width"], source["height"], int(bool(source["audio_codec"])), source["sha256"], timestamp),
         )
         conn.execute("UPDATE mood_projects SET updated_at=? WHERE id=?", (timestamp, project_id))
+        conn.execute("UPDATE library_assets SET last_used_at=? WHERE source_id=?", (timestamp, body.source_id))
+        library = conn.execute("SELECT * FROM library_assets WHERE source_id=?", (body.source_id,)).fetchone()
         row = conn.execute("SELECT * FROM mood_assets WHERE id=?", (asset_id,)).fetchone()
-    return _asset_public(dict(row))
+    return _asset_public(dict(row) | ({
+        "asset_source": library["source"], "source_url": library["source_url"],
+        "creator_name": library["creator_name"], "creator_url": library["creator_url"],
+        "license_reference": library["license_reference"], "license_type": library["license_type"],
+        "attribution_text": library["attribution_text"],
+    } if library else {}))
+
+
+@router.post("/mood-projects/{project_id}/library-assets")
+def attach_library_asset(project_id: str, body: MoodAssetRequest):
+    _project_row(project_id)
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        library = conn.execute("SELECT * FROM library_assets WHERE id=?", (body.asset_id,)).fetchone()
+        if library is None:
+            raise HTTPException(404, "Asset Library tidak ditemukan.")
+        library = dict(library)
+        kind = {"video": "background_video", "image": "background_image", "audio": "music"}[library["kind"]]
+        path = Path(library["path"]).resolve()
+        if not path.is_file() or not (path == ASSET_DIR.resolve() or path.is_relative_to(ASSET_DIR.resolve())
+                                      or path.parent in {SOURCE_DIR.resolve(), LEGACY_SOURCE_DIR.resolve()}):
+            raise HTTPException(404, "File Asset Library tidak ditemukan.")
+        existing = conn.execute(
+            "SELECT * FROM mood_assets WHERE project_id=? AND ((? IS NOT NULL AND source_id=?) OR library_asset_id=?) LIMIT 1",
+            (project_id, library["source_id"], library["source_id"], library["id"]),
+        ).fetchone()
+        timestamp = now()
+        if existing:
+            conn.execute("UPDATE library_assets SET last_used_at=? WHERE id=?", (timestamp, library["id"]))
+            conn.execute("UPDATE mood_assets SET library_asset_id=COALESCE(library_asset_id,?) WHERE id=?",
+                         (library["id"], existing["id"]))
+            existing = conn.execute("SELECT * FROM mood_assets WHERE id=?", (existing["id"],)).fetchone()
+            return _asset_public(dict(existing) | {
+                "asset_source": library["source"], "source_url": library["source_url"],
+                "creator_name": library["creator_name"], "creator_url": library["creator_url"],
+                "license_reference": library["license_reference"], "license_type": library["license_type"],
+                "attribution_text": library["attribution_text"],
+            })
+        has_audio = library["kind"] == "audio"
+        if library["kind"] == "video" and library["source_id"]:
+            audio = conn.execute("SELECT audio_codec FROM sources WHERE id=?", (library["source_id"],)).fetchone()
+            has_audio = bool(audio and audio["audio_codec"])
+        asset_id = uuid.uuid4().hex
+        conn.execute(
+            "INSERT INTO mood_assets(id,project_id,source_id,library_asset_id,kind,name,path,mime_type,size_bytes,duration,width,height,has_audio,sha256,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (asset_id, project_id, library["source_id"], library["id"], kind, library["title"], str(path), library["mime_type"],
+             library["size_bytes"], library["duration"], library["width"], library["height"], int(has_audio),
+             library["sha256"], timestamp),
+        )
+        conn.execute("UPDATE mood_projects SET updated_at=? WHERE id=?", (timestamp, project_id))
+        conn.execute("UPDATE library_assets SET last_used_at=? WHERE id=?", (timestamp, library["id"]))
+        row = conn.execute("SELECT * FROM mood_assets WHERE id=?", (asset_id,)).fetchone()
+    return _asset_public(dict(row) | {
+        "asset_source": library["source"], "source_url": library["source_url"],
+        "creator_name": library["creator_name"], "creator_url": library["creator_url"],
+        "license_reference": library["license_reference"], "license_type": library["license_type"],
+        "attribution_text": library["attribution_text"],
+    })
 
 
 @router.delete("/mood-projects/{project_id}/assets/{asset_id}")
@@ -739,7 +837,7 @@ def delete_mood_asset(project_id: str, asset_id: str):
         path = _safe_asset(dict(row))
         conn.execute("DELETE FROM mood_assets WHERE id=?", (asset_id,))
         conn.execute("UPDATE mood_projects SET updated_at=? WHERE id=?", (now(), project_id))
-    if not row["source_id"]:
+    if not row["source_id"] and not row["library_asset_id"]:
         path.unlink(missing_ok=True)
     return {"deleted": True}
 
@@ -755,6 +853,9 @@ def list_mood_renders(project_id: str):
 @router.post("/mood-projects/{project_id}/render")
 def queue_mood_render(project_id: str, composition: MoodComposition):
     _project_row(project_id)
+    with connect() as conn:
+        if conn.execute("SELECT 1 FROM video_batch_items WHERE mood_project_id=?", (project_id,)).fetchone():
+            raise HTTPException(409, "Render batch items from their Batch Creator page to preserve queue order and snapshots.")
     comp = _model_composition(composition)
     if not comp["text"]["text"].strip():
         raise HTTPException(422, "Isi teks quote sebelum render.")
@@ -788,6 +889,11 @@ def queue_mood_render(project_id: str, composition: MoodComposition):
         if conn.execute("SELECT 1 FROM mood_jobs WHERE project_id=? AND status IN ('queued','preparing','rendering')", (project_id,)).fetchone():
             raise HTTPException(409, "Render Mood Quotes lain masih berjalan.")
         assets = _check_project_assets(project_id, comp)
+        for item in assets.values():
+            if item.get("library_asset_id"):
+                conn.execute("UPDATE library_assets SET last_used_at=? WHERE id=?", (timestamp, item["library_asset_id"]))
+            elif item.get("source_id"):
+                conn.execute("UPDATE library_assets SET last_used_at=? WHERE source_id=?", (timestamp, item["source_id"]))
         if comp["music"].get("asset_id"):
             music_asset = assets[comp["music"]["asset_id"]]
             if comp["music"]["trim_start"] >= music_asset["duration"]:
@@ -841,6 +947,13 @@ def get_mood_job(job_id: str):
 @router.post("/mood-jobs/{job_id}/cancel")
 def cancel_mood_job(job_id: str):
     from .jobs import runner
+    with connect() as conn:
+        batch_item = conn.execute(
+            "SELECT 1 FROM video_batch_items i JOIN mood_jobs j ON j.project_id=i.mood_project_id WHERE j.id=? LIMIT 1",
+            (job_id,),
+        ).fetchone()
+    if batch_item:
+        raise HTTPException(409, "Cancel Mood Quotes batch renders from their Batch Creator page.")
     if not runner.cancel(job_id):
         raise HTTPException(409, "Mood Quotes job tidak sedang menunggu atau berjalan.")
     return {"cancelled": True}
@@ -852,6 +965,12 @@ def retry_mood_job(job_id: str):
         old = conn.execute("SELECT * FROM mood_jobs WHERE id=?", (job_id,)).fetchone()
     if old is None:
         raise HTTPException(404, "Mood Quotes render job tidak ditemukan.")
+    with connect() as conn:
+        if conn.execute(
+            "SELECT 1 FROM video_batch_items i WHERE i.mood_project_id=? LIMIT 1",
+            (old["project_id"],),
+        ).fetchone():
+            raise HTTPException(409, "Retry this render from its Batch Creator page.")
     if old["status"] not in {"failed", "cancelled"}:
         raise HTTPException(409, "Hanya render gagal/dibatalkan yang bisa di-retry.")
     options = json.loads(old["options_json"])
@@ -952,11 +1071,21 @@ def delete_mood_project(project_id: str):
         conn.execute("BEGIN IMMEDIATE")
         if not conn.execute("SELECT 1 FROM mood_projects WHERE id=?", (project_id,)).fetchone():
             raise HTTPException(404, "Mood Quotes draft tidak ditemukan.")
+        if conn.execute("SELECT 1 FROM video_batch_items WHERE mood_project_id=?", (project_id,)).fetchone():
+            raise HTTPException(409, "Remove this Mood Quotes item from its batch before deleting its draft.")
+        if conn.execute("SELECT 1 FROM video_batches WHERE mood_source_project_id=?", (project_id,)).fetchone():
+            raise HTTPException(409, "Remove its Mood Quotes batch record before deleting this source draft.")
         if conn.execute("SELECT 1 FROM mood_jobs WHERE project_id=? AND status IN ('queued','preparing','rendering')", (project_id,)).fetchone():
             raise HTTPException(409, "Batalkan atau tunggu render aktif sebelum menghapus draft.")
+        if conn.execute(
+            "SELECT 1 FROM youtube_publications WHERE content_type='mood_render' AND clip_id IN "
+            "(SELECT id FROM mood_renders WHERE project_id=?) AND status IN ('pending','uploading')",
+            (project_id,),
+        ).fetchone():
+            raise HTTPException(409, "Wait for or cancel queued YouTube uploads before deleting this Mood Quotes draft.")
         assets = conn.execute("SELECT * FROM mood_assets WHERE project_id=?", (project_id,)).fetchall()
         renders = conn.execute("SELECT * FROM mood_renders WHERE project_id=?", (project_id,)).fetchall()
-        safe_assets = [( _safe_asset(dict(row)), bool(row["source_id"])) for row in assets]
+        safe_assets = [(_safe_asset(dict(row)), bool(row["source_id"] or row["library_asset_id"])) for row in assets]
         safe_renders = [_managed_render_path(dict(row)) for row in renders if row["path"]]
         conn.execute("DELETE FROM mood_projects WHERE id=?", (project_id,))
     for path, is_source_asset in safe_assets:

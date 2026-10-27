@@ -17,6 +17,7 @@ from clipper.config import CLIP_DIR
 from clipper.db import connect
 from clipper.jobs import now
 from clipper.main import app
+from clipper.subtitles import composition_fingerprint
 
 
 def run():
@@ -91,6 +92,93 @@ def run():
         assert saved["transcript"] == json.loads(manual_transcript)
         assert (saved["clip"]["start"], saved["clip"]["end"]) == (0, 20)
         assert saved["clip"]["review_status"] == "needs_review"
+        assert client.patch(f"/api/clips/{clip_id}", json={"subtitle_caption_mode": "word_pop"}).status_code == 422
+        assert client.patch(f"/api/clips/{clip_id}", json={"subtitle_enabled": False}).status_code == 200
+        assert client.patch(f"/api/clips/{clip_id}", json={"subtitle_caption_mode": "word_pop"}).status_code == 422
+        pending_words = {
+            "id": "manual-words", "start": 0, "end": 2, "text": "Kalimat uji.",
+            "word_alignment_reviewed": False,
+            "words": [
+                {"id": "word-one", "text": "Kalimat", "start": None, "end": None},
+                {"id": "word-two", "text": "uji.", "start": None, "end": None},
+            ],
+        }
+        pending = client.patch(f"/api/clips/{clip_id}", json={"subtitle_mode": "manual", "subtitle_timebase": "clip", "subtitle_segments": [pending_words]})
+        assert pending.status_code == 200, pending.text
+        timed_words = {**pending_words, "words": [
+            {"id": "word-one", "text": "Kalimat", "start": 0.1, "end": 0.8},
+            {"id": "word-two", "text": "uji.", "start": 1.0, "end": 1.8},
+        ]}
+        timed = client.patch(f"/api/clips/{clip_id}", json={"subtitle_segments": [timed_words]})
+        assert timed.status_code == 200, timed.text
+        reviewed_words = {**timed_words, "word_alignment_reviewed": True}
+        reviewed = client.patch(f"/api/clips/{clip_id}", json={"subtitle_segments": [reviewed_words]})
+        assert reviewed.status_code == 200, reviewed.text
+        shifted_words = {**reviewed_words, "words": [
+            reviewed_words["words"][0], {**reviewed_words["words"][1], "start": 1.1, "end": 1.9},
+        ]}
+        shifted = client.patch(f"/api/clips/{clip_id}", json={"subtitle_segments": [shifted_words]})
+        assert shifted.status_code == 200 and shifted.json()["subtitle_segments"][0]["word_alignment_reviewed"] is False
+        reviewed_words = {**shifted_words, "word_alignment_reviewed": True}
+        reviewed = client.patch(f"/api/clips/{clip_id}", json={"subtitle_segments": [reviewed_words]})
+        assert reviewed.status_code == 200, reviewed.text
+        selected_word_pop = client.patch(f"/api/clips/{clip_id}", json={"subtitle_caption_mode": "word_pop", "subtitle_preset": "Word Pop"})
+        assert selected_word_pop.status_code == 200, selected_word_pop.text
+        assert selected_word_pop.json()["subtitle_caption_mode"] == "word_pop"
+        appearance_only = client.patch(f"/api/clips/{clip_id}", json={"subtitle_preset": "Karaoke Highlight"})
+        assert appearance_only.status_code == 200 and appearance_only.json()["subtitle_caption_mode"] == "word_pop"
+        assert client.patch(f"/api/clips/{clip_id}", json={"subtitle_display_mode": "translated"}).status_code == 422
+        untimed_track = {
+            "id": "untimed-word-track", "source_type": "manual", "language": "und", "timebase": "clip",
+            "segments": [{"id": "untimed-cue", "start": 0, "end": 2, "text": "No word times"}],
+        }
+        assert client.patch(f"/api/clips/{clip_id}", json={
+            "subtitle_tracks": [untimed_track], "subtitle_active_track_id": untimed_track["id"],
+            "subtitle_segments": untimed_track["segments"], "subtitle_timebase": "clip",
+        }).status_code == 422
+        word_track = {
+            "id": "reviewed-word-track", "source_type": "manual", "language": "und", "timebase": "clip",
+            "segments": [reviewed_words],
+        }
+        selected_track = client.patch(f"/api/clips/{clip_id}", json={
+            "subtitle_tracks": [word_track], "subtitle_active_track_id": word_track["id"],
+            "subtitle_segments": [reviewed_words], "subtitle_timebase": "clip",
+        })
+        assert selected_track.status_code == 200, selected_track.text
+        track_edit = {**word_track, "segments": [{
+            **reviewed_words, "words": [reviewed_words["words"][0], {**reviewed_words["words"][1], "start": 1.2, "end": 1.95}],
+        }]}
+        changed_track = client.patch(f"/api/clips/{clip_id}", json={"subtitle_tracks": [track_edit]})
+        assert changed_track.status_code == 200
+        assert changed_track.json()["subtitle_tracks"][0]["segments"][0]["word_alignment_reviewed"] is False
+        reviewed_words = {**track_edit["segments"][0], "word_alignment_reviewed": True}
+        track_edit["segments"] = [reviewed_words]
+        reviewed_track = client.patch(f"/api/clips/{clip_id}", json={"subtitle_tracks": [track_edit]})
+        assert reviewed_track.status_code == 200, reviewed_track.text
+        edited_words = {**reviewed_words, "text": "Kalimat baru."}
+        changed_text = client.patch(f"/api/clips/{clip_id}", json={"subtitle_segments": [edited_words]})
+        assert changed_text.status_code == 200, changed_text.text
+        saved_word = changed_text.json()["subtitle_segments"][0]
+        assert saved_word["words"] == reviewed_words["words"] and saved_word["word_alignment_reviewed"] is False
+        assert client.post(f"/api/clips/{clip_id}/render").status_code == 409
+        restored_type = client.patch(f"/api/clips/{clip_id}", json={"subtitle_caption_mode": "sentence"})
+        assert restored_type.status_code == 200
+        manual_track = {
+            "id": "manual-output", "source_type": "manual", "language": "und", "timebase": "output",
+            "segments": [{"id": "output-cue", "start": 0.25, "end": 1.25, "text": "Output cue"}],
+            "composition_signature": saved["subtitle_status"]["composition_signature"],
+            "composition_fingerprint": "0" * 64,
+        }
+        mapped = client.patch(f"/api/clips/{clip_id}", json={
+            "subtitle_tracks": [manual_track], "subtitle_active_track_id": "manual-output",
+            "subtitle_segments": manual_track["segments"], "subtitle_timebase": "output",
+        })
+        assert mapped.status_code == 200, mapped.text
+        mapped_track = mapped.json()["subtitle_tracks"][0]
+        assert mapped_track["composition_fingerprint"] == saved["subtitle_status"]["composition_fingerprint"]
+        assert mapped_track["composition_fingerprint"] == composition_fingerprint(
+            "test", saved["subtitle_status"]["composition_signature"],
+        )
         assert client.post(f"/api/clips/{clip_id}/review", json={"status": "approved"}).status_code == 409
 
         rendered = CLIP_DIR / f"review-fixture-{clip_id}.mp4"

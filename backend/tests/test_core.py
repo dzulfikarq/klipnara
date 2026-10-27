@@ -11,11 +11,36 @@ from urllib.error import HTTPError, URLError
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from clipper.analysis import RANK_SCHEMA, candidate_schema, parse_and_validate, parse_ranking, ranking_schema, token_bounded_chunks, transcript_chunks
-from clipper.media import MediaError, _public_addresses, _write_ass, probe, transcript_cache_matches, transcription_config_key, transcription_model_id, transcribe
+from clipper.media import MediaError, _audio_filters, _public_addresses, _write_ass, map_scene_subtitles, output_scenes, probe, transcript_cache_matches, transcription_config_key, transcription_model_id, transcribe
 from clipper.providers import ProviderError, _post, _timeout_seconds, analyze, check_local, count_prompt_tokens, local_limits
 
 
 def run():
+    clip = {"id": "multi", "start": 60, "end": 90}
+    multi_edit = {
+        "scene_mode": "multi",
+        "scenes": [
+            {"id": "later", "source_start": 70, "source_end": 75, "order": 1},
+            {"id": "first", "source_start": 10, "source_end": 13, "order": 0},
+            {"id": "repeat", "source_start": 70, "source_end": 74, "order": 2},
+        ],
+        "subtitle_timebase": "source",
+        "subtitle_segments": [
+            {"id": "cross", "start": 72, "end": 77, "text": "Across cut"},
+            {"id": "first-caption", "start": 11.5, "end": 13.5, "text": "First"},
+        ],
+    }
+    timeline = output_scenes(clip, multi_edit)
+    assert [(scene["timeline_start"], scene["timeline_end"]) for scene in timeline] == [(0, 3), (3, 8), (8, 12)]
+    mapped = map_scene_subtitles(clip, multi_edit, [])
+    assert [(item["id"], item["start"], item["end"]) for item in mapped] == [
+        ("first-first-caption", 1.5, 3), ("later-cross", 5, 8), ("repeat-cross", 10, 12),
+    ]
+    legacy_timeline = output_scenes(clip, {"trim_start": 2, "trim_end": 5, "scenes": multi_edit["scenes"]})
+    assert (legacy_timeline[0]["source_start"], legacy_timeline[0]["source_end"], legacy_timeline[0]["duration"]) == (62, 65, 3)
+    filters = _audio_filters({"audio": {"volume": 0.8, "normalize": True, "limiter": True, "fade_in": 1, "fade_out": 2}}, 10)
+    assert filters == ["volume=0.800", "loudnorm=I=-18.0:TP=-1.5:LRA=11", "alimiter=limit=0.95", "afade=t=in:st=0:d=1.000", "afade=t=out:st=8.000:d=2.000"]
+
     no_audio_probe = {"format": {"format_name": "mov,mp4,m4a", "duration": "60"}, "streams": [{
         "codec_type": "video", "codec_name": "h264", "width": 720, "height": 1280,
     }]}
@@ -150,6 +175,67 @@ def run():
         )
         rendered_ass = subtitle.read_text(encoding="utf-8-sig")
         assert "&H0000D7FF" in rendered_ass and "Dialogue: 0,0:00:01.00,0:00:04.00" in rendered_ass
+        _write_ass(
+            subtitle,
+            [{"id": "stable-1", "start": 3, "end": 5, "text": "clip-relative"}],
+            2,
+            8,
+            {"style": "Clean", "subtitle_size": 48, "subtitle_position": 82,
+             "subtitle_color": "#ffffff", "subtitle_overrides": {}},
+            1280,
+            clip_relative=True,
+        )
+        assert "Dialogue: 0,0:00:01.00,0:00:03.00" in subtitle.read_text(encoding="utf-8-sig")
+        word_pop = {
+            "style": "Bold", "subtitle_size": 58, "subtitle_position": 70,
+            "subtitle_color": "#FFDF36", "subtitle_outline_color": "#000000",
+            "subtitle_outline": 4, "subtitle_shadow": 1, "subtitle_background": False,
+            "subtitle_alignment": "center", "subtitle_caption_width": 85, "subtitle_safe_margin": 8,
+            "subtitle_font": "Arial", "subtitle_overrides": {}, "subtitle_caption_mode": "word_pop",
+            "subtitle_animation": "pop", "subtitle_animation_intensity": 0.12, "subtitle_animation_duration": 100,
+        }
+        pop_words = [{
+            "start": 0.05, "end": 0.2, "text": "I'm", "id": "w1"},
+            {"start": 0.22, "end": 0.32, "text": "gonna", "id": "w2"},
+            {"start": 0.35, "end": 0.6, "text": "build", "id": "w3"},
+            {"start": 0.7, "end": 1.2, "text": "pneumonoultramicroscopicsilicovolcanoconiosis", "id": "w4"},
+        ]
+        _write_ass(subtitle, [{"start": 0, "end": 1.5, "text": "Ignored sentence", "words": pop_words}], 0, 2, word_pop, 1280)
+        word_pop_ass = subtitle.read_text(encoding="utf-8-sig")
+        word_dialogues = [line for line in word_pop_ass.splitlines() if line.startswith("Dialogue:")]
+        assert len(word_dialogues) == 4 and "Ignored sentence" not in word_pop_ass
+        assert "#FFDF36" not in word_pop_ass and "\u0026H0036DFFF" in word_pop_ass
+        assert "\\fscx88" in word_dialogues[2] and "\\fscx88" not in word_dialogues[0] and "\\fscx88" not in word_dialogues[1]
+        assert "\\fscx104" in word_dialogues[2]
+        assert "\\fs" in word_dialogues[3]
+        word_pop["subtitle_animation"] = "scale"
+        _write_ass(subtitle, [{"start": 0, "end": 1.5, "text": "Ignored sentence", "words": pop_words}], 0, 2, word_pop, 1280)
+        scaled_dialogues = [line for line in subtitle.read_text(encoding="utf-8-sig").splitlines() if line.startswith("Dialogue:")]
+        assert "\\fscx88" in scaled_dialogues[2] and "\\fscx104" not in scaled_dialogues[2]
+        word_pop["subtitle_animation"] = "none"
+        cut_words = [
+            {"id": "cut-word", "text": "hello", "start": 0.4, "end": 0.5, "source_start": 1.0, "source_end": 1.1},
+            {"id": "cut-word", "text": "hello", "start": 0.5, "end": 0.6, "source_start": 1.1, "source_end": 1.2},
+        ]
+        _write_ass(subtitle, [{"start": 0, "end": 1, "text": "hello", "words": cut_words}], 0, 1, word_pop, 1280)
+        assert len([line for line in subtitle.read_text(encoding="utf-8-sig").splitlines() if line.startswith("Dialogue:")]) == 1
+        cut_words[1]["source_start"] = 1.11
+        _write_ass(subtitle, [{"start": 0, "end": 1, "text": "hello", "words": cut_words}], 0, 1, word_pop, 1280)
+        assert len([line for line in subtitle.read_text(encoding="utf-8-sig").splitlines() if line.startswith("Dialogue:")]) == 2
+        very_long = [{"id": "long", "text": "x" * 250, "start": 0.1, "end": 1.2}]
+        _write_ass(subtitle, [{"start": 0, "end": 1.5, "text": "long", "words": very_long}], 0, 2, word_pop, 1280)
+        long_dialogue = next(line for line in subtitle.read_text(encoding="utf-8-sig").splitlines() if line.startswith("Dialogue:"))
+        assert "\\fs12" in long_dialogue and "\\fscx" in long_dialogue
+        try:
+            _write_ass(subtitle, [{"start": 0, "end": 0.1, "text": "Tiny", "words": [{"id": "tiny", "text": "Tiny", "start": 0.001, "end": 0.004}]}], 0, 2, word_pop, 1280)
+        except MediaError as exc:
+            assert "10 ms" in str(exc)
+        else:
+            raise AssertionError("ASS silently erased sub-centisecond word timing")
+        _write_ass(subtitle, [{"start": 0, "end": 1.5, "text": "Ignored sentence", "words": pop_words}], 0, 2, word_pop, 1920)
+        word_pop_1080 = subtitle.read_text(encoding="utf-8-sig")
+        assert "PlayResY: 1920" in word_pop_1080 and "Style: Default,Arial,87," in word_pop_1080
+        assert "&H00000000,&H80000000,-1,0,1,6,1.5,5," in word_pop_1080
 
     for address in ("127.0.0.1", "10.0.0.1", "169.254.169.254", "::1"):
         try:

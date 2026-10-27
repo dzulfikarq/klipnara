@@ -1,6 +1,8 @@
 import hashlib
 import json
 import logging
+import math
+import os
 import threading
 import time
 import uuid
@@ -8,11 +10,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .analysis import candidate_schema, parse_and_validate, parse_ranking, prompt_for, rank_prompt, ranking_schema, token_bounded_chunks, transcript_chunks
-from .config import CLIP_DIR, WORK_DIR
+from .config import CLIP_DIR, SOURCE_DIR, WORK_DIR
 from .db import connect
-from .media import MediaError, executable, render, transcribe, transcript_cache_matches, transcription_config_key
+from .media import (
+    MediaError, executable, extract_composition_audio, map_scene_subtitles, render,
+    render_subtitle_segments, transcribe, transcribe_gemini, transcribe_openai_current,
+    transcript_cache_matches, transcription_config_key,
+)
 from .mood_renderer import render_mood_video
 from .providers import PromptTooLargeError, ProviderError, analyze, count_prompt_tokens, local_limits, model_for
+from .subtitles import TRANSLATION_SCHEMA, composition_signature, subtitle_content_fingerprint, validate_translation
 
 
 def now():
@@ -27,6 +34,7 @@ def create_job(source_id, kind, options, clip_id=None, resume_from=None):
             "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (job_id, source_id, clip_id, kind, "queued", "queued", None, "Menunggu giliran", json.dumps(options), timestamp, timestamp),
         )
+        conn.execute("UPDATE library_assets SET last_used_at=? WHERE source_id=?", (timestamp, source_id))
         if resume_from:
             conn.execute(
                 "INSERT INTO analysis_chunks(job_id,chunk_index,cache_key,input_tokens,candidates_json,created_at) "
@@ -91,6 +99,49 @@ def update_mood_job(job_id, *, status=None, phase=None, progress=..., message=No
         conn.execute(f"UPDATE mood_jobs SET {','.join(fields)} WHERE id=?", values)
 
 
+def update_youtube_import(job_id, *, status=None, phase=None, progress=..., message=None, source_id=None):
+    fields, values = [], []
+    if status is not None:
+        fields.append("status=?")
+        values.append(status)
+    if phase is not None:
+        fields.append("phase=?")
+        values.append(phase)
+    if progress is not ...:
+        fields.append("progress=?")
+        values.append(progress)
+    if message is not None:
+        fields.append("message=?")
+        values.append(message[:2000])
+    if source_id is not None:
+        fields.append("source_id=?")
+        values.append(source_id)
+    fields.append("updated_at=?")
+    values.extend([now(), job_id])
+    with connect() as conn:
+        conn.execute(f"UPDATE youtube_import_jobs SET {','.join(fields)} WHERE id=?", values)
+
+
+def update_youtube_upload(job_id, *, status=None, phase=None, progress=..., message=None):
+    fields, values = [], []
+    if status is not None:
+        fields.append("status=?")
+        values.append(status)
+    if phase is not None:
+        fields.append("phase=?")
+        values.append(phase)
+    if progress is not ...:
+        fields.append("progress=?")
+        values.append(progress)
+    if message is not None:
+        fields.append("message=?")
+        values.append(message[:2000])
+    fields.append("updated_at=?")
+    values.extend([now(), job_id])
+    with connect() as conn:
+        conn.execute(f"UPDATE youtube_upload_jobs SET {','.join(fields)} WHERE id=?", values)
+
+
 class JobRunner:
     def __init__(self):
         self._thread = None
@@ -106,20 +157,79 @@ class JobRunner:
     def cancel(self, job_id):
         with connect() as conn:
             row = conn.execute("SELECT status,kind FROM jobs WHERE id=?", (job_id,)).fetchone()
-            mood_job = False
+            queue = "clip"
             if not row:
                 row = conn.execute("SELECT status,kind FROM mood_jobs WHERE id=?", (job_id,)).fetchone()
-                mood_job = bool(row)
+                queue = "mood"
+            if not row:
+                row = conn.execute("SELECT status,'youtube_import' AS kind FROM youtube_import_jobs WHERE id=?", (job_id,)).fetchone()
+                queue = "youtube_import"
+            if not row:
+                row = conn.execute("SELECT status,'youtube_upload' AS kind FROM youtube_upload_jobs WHERE id=?", (job_id,)).fetchone()
+                queue = "youtube_upload"
+            if not row:
+                row = conn.execute("SELECT status,phase,'platform_upload' AS kind FROM platform_upload_jobs WHERE id=?", (job_id,)).fetchone()
+                queue = "platform_upload"
             if not row:
                 return False
             if row["kind"] == "youtube_upload":
                 return False
+            if queue == "platform_upload":
+                if row["status"] == "queued":
+                    changed = conn.execute(
+                        "UPDATE platform_upload_jobs SET status='cancelled',phase='cancelled',next_poll_at=NULL,"
+                        "last_error='Cancelled before transfer started.',updated_at=? WHERE id=? AND status='queued'",
+                        (now(), job_id),
+                    ).rowcount
+                    if changed:
+                        conn.execute(
+                            "INSERT INTO platform_upload_events(id,upload_job_id,event_type,message,details_json,occurred_at) VALUES(?,?,?,?,?,?)",
+                            (uuid.uuid4().hex, job_id, "cancelled", "Cancelled before provider transfer started.", "{}", now()),
+                        )
+                        return True
+                    row = conn.execute("SELECT status,phase FROM platform_upload_jobs WHERE id=?", (job_id,)).fetchone()
+                    if row and row["status"] == "uploading" and row["phase"] != "publishing":
+                        event = self._cancel.get(job_id)
+                        if event:
+                            event.set()
+                            return True
+                elif row["status"] == "uploading":
+                    if row["phase"] == "publishing":
+                        return False
+                    event = self._cancel.get(job_id)
+                    if event:
+                        event.set()
+                        return True
+                return False
             if row["status"] == "queued":
-                updater = update_mood_job if mood_job else update_job
-                updater(job_id, status="cancelled", phase="cancelled", message="Dibatalkan pengguna.")
-                if mood_job:
+                if queue == "youtube_import":
+                    changed = conn.execute(
+                        "UPDATE youtube_import_jobs SET status='cancelled',phase='cancelled',"
+                        "message='Dibatalkan pengguna.',updated_at=? WHERE id=? AND status='queued'",
+                        (now(), job_id),
+                    ).rowcount
+                    if not changed:
+                        event = self._cancel.get(job_id)
+                        if not event:
+                            return False
+                        event.set()
+                elif queue == "youtube_upload":
+                    changed = conn.execute(
+                        "UPDATE youtube_upload_jobs SET status='cancelled',phase='cancelled',"
+                        "message='Upload dibatalkan sebelum dimulai.',updated_at=? WHERE id=? AND status='queued'",
+                        (now(), job_id),
+                    ).rowcount
+                    if not changed:
+                        event = self._cancel.get(job_id)
+                        if not event:
+                            return False
+                        event.set()
+                else:
+                    updater = update_mood_job if queue == "mood" else update_job
+                    updater(job_id, status="cancelled", phase="cancelled", message="Dibatalkan pengguna.")
+                if queue == "mood":
                     conn.execute("UPDATE mood_renders SET status='cancelled',updated_at=? WHERE job_id=?", (now(), job_id))
-            elif row["status"] in {"preparing", "transcribing", "analyzing", "rendering"}:
+            elif row["status"] in {"preparing", "importing", "processing", "preparing_audio", "uploading", "transcribing", "processing_result", "analyzing", "rendering"}:
                 event = self._cancel.get(job_id)
                 if event:
                     event.set()
@@ -135,18 +245,26 @@ class JobRunner:
                 row = conn.execute(
                     "SELECT id,kind,created_at,'clip' AS queue FROM jobs WHERE status='queued' "
                     "UNION ALL SELECT id,kind,created_at,'mood' AS queue FROM mood_jobs WHERE status='queued' "
+                    "UNION ALL SELECT id,'youtube_import' AS kind,created_at,'youtube_import' AS queue FROM youtube_import_jobs WHERE status='queued' "
+                    "UNION ALL SELECT id,kind,created_at,'youtube_upload' AS queue FROM youtube_upload_jobs WHERE status='queued' "
+                    "UNION ALL SELECT id,'platform_upload' AS kind,created_at,'platform_upload' AS queue FROM platform_upload_jobs WHERE status='queued' "
                     "ORDER BY created_at LIMIT 1"
                 ).fetchone()
             if row is None:
                 if self._active_lock.acquire(blocking=False):
                     try:
+                        from .platform_publishing import next_due_platform_upload, poll_platform_upload
                         from .youtube import next_due_publication, poll_publication
 
-                        publication_id = next_due_publication()
-                        if publication_id:
-                            poll_publication(publication_id)
+                        platform_job_id = next_due_platform_upload()
+                        if platform_job_id:
+                            poll_platform_upload(platform_job_id)
+                        else:
+                            publication_id = next_due_publication()
+                            if publication_id:
+                                poll_publication(publication_id)
                     except Exception:
-                        logging.getLogger("klipnara").exception("YouTube processing poll failed")
+                        logging.getLogger("klipnara").exception("Platform status poll failed")
                     finally:
                         self._active_lock.release()
                 time.sleep(0.5)
@@ -155,11 +273,28 @@ class JobRunner:
                 time.sleep(0.2)
                 continue
             job = dict(row)
+            cancel = threading.Event()
+            self._cancel[job["id"]] = cancel
             with connect() as conn:
                 if job["queue"] == "mood":
                     claimed = conn.execute(
                         "UPDATE mood_jobs SET status='preparing',phase='preparing',message='Menyiapkan Mood Quotes',updated_at=? "
                         "WHERE id=? AND status='queued'", (now(), job["id"]),
+                    ).rowcount
+                elif job["queue"] == "youtube_import":
+                    claimed = conn.execute(
+                        "UPDATE youtube_import_jobs SET status='preparing',phase='preparing',message='Menyiapkan impor segmen',updated_at=? "
+                        "WHERE id=? AND status='queued'", (now(), job["id"]),
+                    ).rowcount
+                elif job["queue"] == "youtube_upload":
+                    claimed = conn.execute(
+                        "UPDATE youtube_upload_jobs SET status='preparing',phase='preparing',message='Menyiapkan upload YouTube',updated_at=? "
+                        "WHERE id=? AND status='queued'", (now(), job["id"]),
+                    ).rowcount
+                elif job["queue"] == "platform_upload":
+                    claimed = conn.execute(
+                        "UPDATE platform_upload_jobs SET status='uploading',phase=CASE WHEN phase='queued' THEN 'preparing' ELSE phase END,"
+                        "updated_at=? WHERE id=? AND status='queued'", (now(), job["id"]),
                     ).rowcount
                 else:
                     claimed = conn.execute(
@@ -167,23 +302,37 @@ class JobRunner:
                         "WHERE id=? AND status='queued'", (now(), job["id"]),
                     ).rowcount
             if not claimed:
+                self._cancel.pop(job["id"], None)
                 self._active_lock.release()
                 continue
             with connect() as conn:
-                record = conn.execute("SELECT * FROM mood_jobs WHERE id=?", (job["id"],)).fetchone() if job["queue"] == "mood" else conn.execute("SELECT * FROM jobs WHERE id=?", (job["id"],)).fetchone()
+                table = {"mood": "mood_jobs", "youtube_import": "youtube_import_jobs", "youtube_upload": "youtube_upload_jobs", "platform_upload": "platform_upload_jobs", "clip": "jobs"}[job["queue"]]
+                record = conn.execute(f"SELECT * FROM {table} WHERE id=?", (job["id"],)).fetchone()
             queue = job["queue"]
             job = dict(record)
             job["queue"] = queue
-            cancel = threading.Event()
-            self._cancel[job["id"]] = cancel
+            try:
+                from .batch_studio import batch_job_started
+
+                batch_job_started(job["id"])
+            except Exception:
+                logging.getLogger("klipnara").exception("Could not mark batch item started: %s", job["id"])
             try:
                 if job["queue"] == "mood":
                     self._process_mood(job, cancel)
+                elif job["queue"] == "youtube_import":
+                    self._process_youtube_import(job, cancel)
+                elif job["queue"] == "platform_upload":
+                    self._process_platform_upload(job, cancel)
                 else:
                     self._process(job, cancel)
             except (MediaError, ProviderError, ValueError) as exc:
-                if cancel.is_set() or str(exc) == "Job cancelled.":
-                    updater = update_mood_job if job["queue"] == "mood" else update_job
+                if job["queue"] == "platform_upload":
+                    from .platform_publishing import fail_platform_upload
+
+                    fail_platform_upload(job["id"], exc, cancelled=cancel.is_set())
+                elif cancel.is_set() or str(exc) == "Job cancelled.":
+                    updater = {"clip": update_job, "mood": update_mood_job, "youtube_import": update_youtube_import, "youtube_upload": update_youtube_upload}[job["queue"]]
                     updater(job["id"], status="cancelled", phase="cancelled", progress=None, message="Dibatalkan pengguna.")
                     if job["queue"] == "mood":
                         with connect() as conn:
@@ -192,7 +341,7 @@ class JobRunner:
                         with connect() as conn:
                             conn.execute("UPDATE clips SET status=CASE WHEN rendered_path IS NULL THEN 'ready' ELSE 'needs_render' END WHERE id=? AND status='rendering'", (job["clip_id"],))
                 else:
-                    updater = update_mood_job if job["queue"] == "mood" else update_job
+                    updater = {"clip": update_job, "mood": update_mood_job, "youtube_import": update_youtube_import, "youtube_upload": update_youtube_upload}[job["queue"]]
                     updater(job["id"], status="failed", phase="failed", progress=None, message=str(exc))
                     if job["queue"] == "mood":
                         with connect() as conn:
@@ -202,19 +351,98 @@ class JobRunner:
                             conn.execute("UPDATE clips SET status=CASE WHEN rendered_path IS NULL THEN 'ready' ELSE 'needs_render' END WHERE id=? AND status='rendering'", (job["clip_id"],))
             except Exception:
                 logging.getLogger("klipnara").exception("Unexpected failure in local job %s", job["id"])
-                updater = update_mood_job if job["queue"] == "mood" else update_job
-                updater(job["id"], status="failed", phase="failed", progress=None, message="Proses gagal. Periksa konfigurasi dan log backend.")
-                if job["queue"] == "mood":
-                    with connect() as conn:
-                        conn.execute("UPDATE mood_renders SET status='failed',updated_at=? WHERE job_id=?", (now(), job["id"]))
-                elif job.get("clip_id"):
-                    with connect() as conn:
-                        conn.execute("UPDATE clips SET status=CASE WHEN rendered_path IS NULL THEN 'ready' ELSE 'needs_render' END WHERE id=? AND status='rendering'", (job["clip_id"],))
+                if job["queue"] == "platform_upload":
+                    from .platform_publishing import fail_platform_upload
+
+                    fail_platform_upload(job["id"], "Platform transfer failed. Check backend log and reconcile provider state.")
+                else:
+                    updater = {"clip": update_job, "mood": update_mood_job, "youtube_import": update_youtube_import, "youtube_upload": update_youtube_upload}[job["queue"]]
+                    updater(job["id"], status="failed", phase="failed", progress=None, message="Proses gagal. Periksa konfigurasi dan log backend.")
+                    if job["queue"] == "mood":
+                        with connect() as conn:
+                            conn.execute("UPDATE mood_renders SET status='failed',updated_at=? WHERE job_id=?", (now(), job["id"]))
+                    elif job.get("clip_id"):
+                        with connect() as conn:
+                            conn.execute("UPDATE clips SET status=CASE WHEN rendered_path IS NULL THEN 'ready' ELSE 'needs_render' END WHERE id=? AND status='rendering'", (job["clip_id"],))
             finally:
-                (WORK_DIR / f"{job['id']}.wav").unlink(missing_ok=True)
+                try:
+                    from .batch_studio import batch_job_finished
+
+                    batch_job_finished(job["id"])
+                except Exception:
+                    logging.getLogger("klipnara").exception("Could not advance batch after job: %s", job["id"])
+                for suffix in (".wav", ".m4a"):
+                    (WORK_DIR / f"{job['id']}{suffix}").unlink(missing_ok=True)
                 (WORK_DIR / f"{job['id']}.ass").unlink(missing_ok=True)
                 self._cancel.pop(job["id"], None)
                 self._active_lock.release()
+
+    def _process_youtube_import(self, job, cancel):
+        from .asset_library import register_source_asset
+        from .youtube_import import cleanup_temp, download_segment
+
+        temp_dir = None
+        source_id = job["id"]
+        final_path = SOURCE_DIR / f"{source_id}.mp4"
+        if final_path.exists():
+            raise MediaError("File tujuan impor sudah ada; job dihentikan tanpa menimpa source.")
+
+        def progress(value):
+            update_youtube_import(
+                job["id"], status="importing", phase="importing", progress=value,
+                message="Mengimpor segmen yang dipilih dengan adapter lokal",
+            )
+
+        try:
+            update_youtube_import(job["id"], phase="preparing", progress=0, message="Memvalidasi URL, izin, dan adapter lokal")
+            path, metadata, size, digest, temp_dir = download_segment(
+                job["id"], job["canonical_url"], job["video_id"], job["start_seconds"], job["end_seconds"],
+                bool(job["rights_confirmed"]), cancel, progress,
+            )
+            if cancel.is_set():
+                raise MediaError("Impor dibatalkan pengguna.")
+            update_youtube_import(job["id"], status="processing", phase="processing", progress=0.97, message="Memvalidasi dan menyimpan source lokal")
+            try:
+                os.link(path, final_path)
+            except FileExistsError:
+                raise MediaError("File tujuan impor sudah ada; source existing tidak ditimpa.") from None
+            except OSError as exc:
+                raise MediaError(f"Tidak dapat menyimpan source impor ({type(exc).__name__}).") from None
+            timestamp = now()
+            try:
+                path.unlink()
+                with connect() as conn:
+                    conn.execute("BEGIN IMMEDIATE")
+                    if cancel.is_set():
+                        raise MediaError("Impor dibatalkan pengguna.")
+                    conn.execute(
+                        "INSERT INTO sources(id,name,path,size_bytes,duration,width,height,video_codec,audio_codec,sha256,created_at) "
+                        "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            source_id,
+                            f"YouTube segment {job['video_id']} {job['start_seconds']:.0f}-{job['end_seconds']:.0f}.mp4",
+                            str(final_path.resolve()), size, metadata["duration"], metadata["width"], metadata["height"],
+                            metadata["video_codec"], metadata["audio_codec"], digest, timestamp,
+                        ),
+                    )
+                    register_source_asset(conn, {
+                        "id": source_id,
+                        "name": f"YouTube segment {job['video_id']} {job['start_seconds']:.0f}-{job['end_seconds']:.0f}.mp4",
+                        "path": str(final_path.resolve()), "size_bytes": size, "duration": metadata["duration"],
+                        "width": metadata["width"], "height": metadata["height"], "sha256": digest,
+                        "created_at": timestamp,
+                    })
+                    conn.execute(
+                        "UPDATE youtube_import_jobs SET source_id=?,status='ready',phase='ready',progress=1,"
+                        "message='Segmen lokal siap untuk Quick Clip',updated_at=? WHERE id=?",
+                        (source_id, timestamp, job["id"]),
+                    )
+            except Exception:
+                final_path.unlink(missing_ok=True)
+                raise
+        finally:
+            if temp_dir:
+                cleanup_temp(temp_dir)
 
     def _process_mood(self, job, cancel):
         from .mood_studio import _check_project_assets
@@ -238,21 +466,37 @@ class JobRunner:
                 conn.execute("UPDATE mood_projects SET current_render_id=?,updated_at=? WHERE id=?", (job["render_id"], now(), job["project_id"]))
         update_mood_job(job["id"], status="completed", phase="completed", progress=1, message="Mood Quotes MP4 siap untuk review")
 
+    def _process_platform_upload(self, job, cancel):
+        from .platform_publishing import run_platform_upload, update_platform_upload
+
+        def progress(sent, total):
+            update_platform_upload(job["id"], status="uploading", progress=(sent / total if total else 0))
+
+        run_platform_upload(job["id"], cancel, progress)
+
     def _process(self, job, cancel):
         options = json.loads(job["options_json"])
-        with connect() as conn:
-            source = dict(conn.execute("SELECT * FROM sources WHERE id=?", (job["source_id"],)).fetchone())
         if job["kind"] == "youtube_upload":
             from .youtube import run_upload
 
+            update = update_youtube_upload if job.get("queue") == "youtube_upload" else update_job
+
             def upload_progress(sent, total):
-                update_job(
+                update(
                     job["id"], phase="uploading", progress=(sent / total if total else 0),
                     message=f"YouTube upload · {sent:,}/{total:,} bytes confirmed",
                 )
 
             run_upload(json.loads(job["options_json"])["publication_id"], cancel, upload_progress)
-            update_job(job["id"], status="completed", phase="completed", progress=1, message="Video diterima YouTube; menunggu processing")
+            update(job["id"], status="completed", phase="completed", progress=1, message="Upload selesai; status remote diperiksa")
+            return
+        with connect() as conn:
+            source = dict(conn.execute("SELECT * FROM sources WHERE id=?", (job["source_id"],)).fetchone())
+        if job["kind"] == "subtitle_transcribe":
+            self._process_subtitle_transcription(job, source, options, cancel)
+            return
+        if job["kind"] == "subtitle_translate":
+            self._process_subtitle_translation(job, options, cancel)
             return
         if job["kind"] in {"render", "quick_clip"}:
             self._render_job(job, source, options, cancel)
@@ -427,7 +671,9 @@ class JobRunner:
     def _render_job(self, job, source, options, cancel):
         with connect() as conn:
             clip = dict(conn.execute("SELECT * FROM clips WHERE id=?", (job["clip_id"],)).fetchone())
-        segments = json.loads(source["transcript_json"] or "[]")
+        segments = render_subtitle_segments(
+            clip, options["edit"], json.loads(source["transcript_json"] or "[]"), source["sha256"],
+        )
         with connect() as conn:
             conn.execute("UPDATE clips SET status='rendering' WHERE id=?", (clip["id"],))
         output = render(
@@ -444,6 +690,143 @@ class JobRunner:
         if old and old != str(output):
             Path(old).unlink(missing_ok=True)
         update_job(job["id"], status="completed", phase="completed", progress=1, message="MP4 siap diunduh")
+
+    def _process_subtitle_transcription(self, job, source, options, cancel):
+        with connect() as conn:
+            clip_row = conn.execute("SELECT * FROM clips WHERE id=?", (job["clip_id"],)).fetchone()
+        if clip_row is None:
+            raise MediaError("Clip was deleted before subtitle transcription started.")
+        clip, edit = dict(clip_row), options["edit_snapshot"]
+        provider = options["provider"]
+        audio = WORK_DIR / f"{job['id']}{'.wav' if provider == 'local' else '.m4a'}"
+
+        def progress(phase, message):
+            if cancel.is_set():
+                raise MediaError("Job cancelled.")
+            update_job(job["id"], status=phase, phase=phase, progress=None, message=message)
+
+        try:
+            duration = extract_composition_audio(
+                source["path"], clip, edit, audio, cancel, progress, local=provider == "local",
+            )
+            if cancel.is_set():
+                raise MediaError("Job cancelled.")
+            if provider == "local":
+                progress("transcribing", "Transkripsi lokal · whisper.cpp")
+                raw_segments, language, model = transcribe(audio, options["language"], cancel)
+                segments = []
+                for item in raw_segments:
+                    text = str(item.get("text") or "").strip()
+                    try:
+                        start, end = max(0.0, float(item["start"])), min(duration, float(item["end"]))
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    if not text or not math.isfinite(start) or not math.isfinite(end) or start >= end:
+                        continue
+                    if len(text) > 500:
+                        raise MediaError("A local transcript segment exceeds 500 characters. Shorten composition or edit transcript manually.")
+                    segments.append({"id": f"seg-{uuid.uuid4().hex}", "start": round(start, 3), "end": round(end, 3),
+                                     "text": text, "original_text": text, "edited": False})
+                if not segments:
+                    raise MediaError("No timed speech was detected in this composition.")
+                transcript = " ".join(item["text"] for item in segments)
+            elif provider == "openai":
+                progress("transcribing", "OpenAI gpt-transcribe · text-only, no timestamp alignment")
+                result = transcribe_openai_current(audio, options["language"])
+                segments, language, model, transcript = [], result.get("language", "unknown"), result["model"], result["text"]
+            else:
+                result = transcribe_gemini(audio, options["language"], duration, cancel, progress)
+                segments, language, model, transcript = result["segments"], result["language"], result["model"], result["text"]
+        finally:
+            audio.unlink(missing_ok=True)
+        if cancel.is_set():
+            raise MediaError("Job cancelled.")
+        if len(segments) > 500:
+            raise MediaError("Transcription produced over 500 subtitle cues. Shorten composition and retry.")
+        signature = composition_signature(options["scenes"])
+        track = {
+            "id": options["track_id"], "source_type": "generated", "provider": provider,
+            "model": model, "language": language or "unknown", "timebase": "output",
+            "segments": segments, "transcript_text": transcript[:100000],
+            "composition_signature": signature,
+            "composition_fingerprint": options["composition_fingerprint"],
+            "word_timestamps": any(item.get("words") for item in segments),
+            "speaker_identification": any(item.get("speaker_id") or any(word.get("speaker_id") for word in item.get("words", [])) for item in segments),
+            "edited": False,
+        }
+        update_job(job["id"], status="processing_result", phase="processing_result", progress=None, message="Menyimpan transkrip untuk review; subtitle lama tidak diganti")
+        with connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT edit_json FROM clips WHERE id=?", (clip["id"],)).fetchone()
+            if row is None:
+                raise MediaError("Clip was deleted before transcript could be saved.")
+            current = json.loads(row["edit_json"])
+            tracks = current.setdefault("subtitle_tracks", [])
+            tracks = [item for item in tracks if item.get("id") != track["id"]]
+            if len(tracks) >= 20:
+                raise MediaError("Subtitle track limit reached (20). Remove a draft, then retry.")
+            tracks.append(track)
+            current["subtitle_tracks"] = tracks
+            conn.execute("UPDATE clips SET edit_json=? WHERE id=?", (json.dumps(current, ensure_ascii=False), clip["id"]))
+        update_job(job["id"], status="completed", phase="completed", progress=1, message="Transkrip siap ditinjau; pilih Gunakan untuk mengaktifkan")
+
+    def _process_subtitle_translation(self, job, options, cancel):
+        source_segments = options["source_segments"]
+        provider, target = options["provider"], options["target_language"]
+        translated = []
+        batch_size = 40
+        batches = [source_segments[index:index + batch_size] for index in range(0, len(source_segments), batch_size)]
+        for index, batch in enumerate(batches):
+            if cancel.is_set():
+                raise MediaError("Job cancelled.")
+            prompt = (
+                f"Translate subtitle cues to {target}. Preserve meaning and context; use natural language; do not add information; "
+                "retain proper nouns and technical terms where appropriate; keep mobile-readable length. Return exactly one translated "
+                "text for every input id, in the same order. Do not add, remove, merge, or split cues. Do not return timestamps.\n"
+                + json.dumps({"segments": [{"id": item["id"], "text": item["text"]} for item in batch]}, ensure_ascii=False)
+            )
+            update_job(job["id"], status="transcribing", phase="transcribing", progress=None,
+                       message=f"Menerjemahkan batch {index + 1}/{len(batches)} · {provider}")
+            raw, model, usage = analyze(provider, prompt, TRANSLATION_SCHEMA, "subtitle_translation")
+            outputs = validate_translation(raw, batch)
+            translated.extend(outputs)
+            with connect() as conn:
+                _save_usage(conn, job["id"], provider, model, usage)
+            if cancel.is_set():
+                raise MediaError("Job cancelled.")
+            update_job(job["id"], status="processing_result", phase="processing_result",
+                       progress=(index + 1) / max(1, len(batches)), message=f"Batch terjemahan {index + 1}/{len(batches)} selesai")
+        if not translated:
+            raise MediaError("No subtitle cues available to translate.")
+        source_by_id = {item["id"]: item for item in source_segments}
+        track = {
+            "id": options["track_id"], "source_type": "translation", "provider": provider,
+            "model": model, "language": target, "timebase": options["source_timebase"],
+            "source_track_id": options["source_track_id"], "source_fingerprint": options["source_fingerprint"],
+            "composition_signature": options.get("composition_signature"),
+            "composition_fingerprint": options.get("composition_fingerprint"),
+            "segments": [
+                {"id": f"tr-{uuid.uuid4().hex}", "source_segment_id": item["id"],
+                 "start": source_by_id[item["id"]]["start"], "end": source_by_id[item["id"]]["end"],
+                 "text": item["text"], "edited": False}
+                for item in translated
+            ],
+            "edited": False,
+        }
+        with connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT edit_json FROM clips WHERE id=?", (job["clip_id"],)).fetchone()
+            if row is None:
+                raise MediaError("Clip was deleted before translation could be saved.")
+            current = json.loads(row["edit_json"])
+            tracks = current.setdefault("subtitle_tracks", [])
+            tracks = [item for item in tracks if item.get("id") != track["id"]]
+            if len(tracks) >= 20:
+                raise MediaError("Subtitle track limit reached (20). Remove a draft, then retry.")
+            tracks.append(track)
+            current["subtitle_tracks"] = tracks
+            conn.execute("UPDATE clips SET edit_json=? WHERE id=?", (json.dumps(current, ensure_ascii=False), job["clip_id"]))
+        update_job(job["id"], status="completed", phase="completed", progress=1, message="Terjemahan tersimpan sebagai track terpisah; tinjau sebelum digunakan")
 
 
 runner = JobRunner()

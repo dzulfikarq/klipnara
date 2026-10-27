@@ -14,6 +14,7 @@ MOOD_DIR = DATA_DIR / "mood"
 LEGACY_SOURCE_DIR = DATA_DIR / "sources"
 LEGACY_CLIP_DIR = DATA_DIR / "clips"
 SOURCE_DIR = Path(os.environ.get("CLIPPER_SOURCE_DIR", LEGACY_SOURCE_DIR)).resolve()
+ASSET_DIR = SOURCE_DIR / "library-assets"
 CLIP_DIR = Path(os.environ.get("CLIPPER_CLIP_DIR", LEGACY_CLIP_DIR)).resolve()
 DB_PATH = DATA_DIR / "clipper.sqlite3"
 MAX_UPLOAD_BYTES = int(os.environ.get("CLIPPER_MAX_UPLOAD_BYTES", 2 * 1024**3))

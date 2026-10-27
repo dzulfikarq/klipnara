@@ -1,5 +1,13 @@
-export const API = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+const configuredApi = process.env.NEXT_PUBLIC_API_URL?.trim() || "http://127.0.0.1:8000";
+export const API = configuredApi.replace(/\/+$/, "").replace(/\/api$/i, "");
 export type ReviewStatus = "needs_review" | "approved" | "needs_revision";
+
+export class ApiRequestError extends Error {
+  constructor(message: string, readonly status: number, readonly path: string) {
+    super(message);
+    this.name = "ApiRequestError";
+  }
+}
 
 export function reviewStatusLabel(status: ReviewStatus) {
   return status === "approved" ? "Disetujui" : status === "needs_revision" ? "Perlu Revisi" : "Perlu Review";
@@ -38,12 +46,13 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   try {
     response = await fetch(`${API}/api${path}`, { ...init, headers, cache: "no-store" });
   } catch {
-    throw new Error("Backend tidak terhubung. Jalankan FastAPI di 127.0.0.1:8000.");
+    throw new Error(`Frontend tidak bisa mengakses API di ${API}. Pastikan FastAPI hidup dan CORS mengizinkan origin frontend.`);
   }
   if (!response.ok) {
     const data = await response.json().catch(() => null);
     const detail = formatErrorDetail(data?.detail);
-    throw new Error(detail === "Request gagal." ? `Request gagal (${response.status}).` : detail);
+    const message = detail === "Request gagal." ? `Request gagal (${response.status}).` : detail;
+    throw new ApiRequestError(message, response.status, path);
   }
   return response.json();
 }

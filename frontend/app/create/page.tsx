@@ -2,9 +2,10 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { AlertCircle, ArrowLeft, ArrowRight, Check, CheckCircle2, ChevronDown, Clock3, Cloud, Cpu, Heart, Info, LoaderCircle, LockKeyhole, MonitorPlay, Music2, Scissors, Sparkles, Upload, Video, X, Youtube } from "lucide-react";
+import { AlertCircle, ArrowLeft, ArrowRight, Check, CheckCircle2, ChevronDown, Clock3, Cloud, Cpu, Film, Heart, Info, LoaderCircle, LockKeyhole, MonitorPlay, Music2, Scissors, Sparkles, Upload, Video, X, Youtube } from "lucide-react";
 import { ChangeEvent, DragEvent, useEffect, useRef, useState } from "react";
 import { API, formatBytes, formatDuration, request } from "@/lib/api";
+import { YouTubeClipFlow } from "@/components/youtube-clip-flow";
 
 type Source = { id: string; name: string; duration: number; width: number; height: number; size_bytes: number; video_codec: string; audio_codec: string | null };
 type SavedSource = Source & { clip_count?: number; latest_status?: string | null };
@@ -40,6 +41,7 @@ export default function CreatePage() {
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [workflow, setWorkflow] = useState<"quick" | "ai">("quick");
   const [entrySelected, setEntrySelected] = useState(false);
+  const [youtubeClipMode, setYoutubeClipMode] = useState(false);
   const [sourceMode, setSourceMode] = useState<"upload" | "url" | "library">("upload");
   const [file, setFile] = useState<File | null>(null);
   const [url, setUrl] = useState("");
@@ -173,13 +175,16 @@ export default function CreatePage() {
     router.replace(`/create?mode=${mode}`, { scroll: false });
   };
 
+  if (youtubeClipMode) return <YouTubeClipFlow onBack={() => setYoutubeClipMode(false)}/>;
+
   if (!entrySelected) return <>
-    <div className="page-intro"><div className="eyebrow">KLIPNARA STUDIO 2.1</div><h1>Buat Video</h1><p>Pilih alur video yang ingin kamu buat. File tetap diproses secara lokal.</p></div>
+    <div className="page-intro"><div className="eyebrow">KLIPNARA STUDIO 2.9</div><h1>Buat Video</h1><p>Pilih alur video yang ingin kamu buat. File tetap diproses secara lokal.</p></div>
     <section className="mode-card-grid" aria-label="Pilih mode pembuatan video">
       <button type="button" className="mode-card" onClick={() => openClipMode("quick")}><span className="mode-card-icon"><Scissors size={20}/></span><span className="mode-card-copy"><strong>Quick Clip</strong><small>Potong video sendiri dengan timestamp. Tanpa AI.</small><em>Siap digunakan</em></span><ArrowRight size={17}/></button>
       <button type="button" className="mode-card" onClick={() => openClipMode("ai")}><span className="mode-card-icon"><Sparkles size={20}/></span><span className="mode-card-copy"><strong>AI Smart Clip</strong><small>Temukan highlight dari video dengan transkripsi dan AI.</small><em>Perlu runtime AI atau provider cloud</em></span><ArrowRight size={17}/></button>
       <Link href="/mood" className="mode-card mode-card-featured"><span className="mode-card-icon"><Heart size={20}/></span><span className="mode-card-copy"><strong>AI Mood Quotes</strong><small>Buat quote dan video aesthetic dengan background, musik, dan tipografi.</small><em>Workspace kreator</em></span><ArrowRight size={17}/></Link>
-      <article className="mode-card mode-card-disabled" aria-disabled="true"><span className="mode-card-icon"><Youtube size={20}/></span><span className="mode-card-copy"><strong>YouTube Clip</strong><small>Impor berdasarkan URL YouTube belum tersedia.</small><em>Segera Hadir</em></span></article>
+      <Link href="/batches" className="mode-card"><span className="mode-card-icon"><Film size={20}/></span><span className="mode-card-copy"><strong>Batch Creator</strong><small>Siapkan beberapa Short atau Mood Quotes, lalu render satu per satu.</small><em>Maks. 10 output · review individual</em></span><ArrowRight size={17}/></Link>
+      <button type="button" className="mode-card mode-card-youtube" onClick={() => setYoutubeClipMode(true)}><span className="mode-card-icon"><Youtube size={20}/></span><span className="mode-card-copy"><strong>YouTube Clip</strong><small>Preview URL, pilih timestamp, lalu gunakan file sumber lokal.</small><em>Preview · Quick Clip existing</em></span><ArrowRight size={17}/></button>
     </section>
   </>;
 

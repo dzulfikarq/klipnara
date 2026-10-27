@@ -2,16 +2,17 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { AlertCircle, ArrowLeft, ArrowRight, Check, CheckCircle2, Clock3, Cloud, Copy, Download, Heart, LoaderCircle, LockKeyhole, Music2, Pause, Play, Plus, RotateCcw, Save, Scissors, Sparkles, Trash2, Upload, Video, Volume2, VolumeX, WandSparkles, X, ZoomIn, ZoomOut } from "lucide-react";
+import { AlertCircle, ArrowLeft, ArrowRight, Check, CheckCircle2, Clock3, Cloud, Copy, Download, Heart, Image, LoaderCircle, LockKeyhole, Music2, Pause, Play, Plus, RotateCcw, Save, Scissors, Search, Sparkles, Trash2, Upload, Video, Volume2, VolumeX, WandSparkles, X, Youtube, ZoomIn, ZoomOut } from "lucide-react";
 import { ChangeEvent, CSSProperties, PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from "react";
-import { API, formatDuration, request } from "@/lib/api";
+import { API, formatBytes, formatDuration, request } from "@/lib/api";
 import { createSerializedSaveQueue } from "@/lib/mood-draft.mjs";
 import { duplicateSegment as duplicateTimelineSegment, mergeSegment, musicPlaybackSpan, resetSegmentTimings, semanticSegments, snapTimelineTime, splitSegment, timeAtPosition, updateSegmentTiming } from "@/lib/mood-timeline.mjs";
 
 type Option = { id: string; name: string; seconds?: number[] };
 type Category = { id: string; name: string; description: string; subcategories: Option[] };
 type Quote = { id: string; title: string; text: string; segments: { text: string; order: number }[]; mood: string; tone: string; visual_keywords: string[]; music_mood: string };
-type Asset = { id: string; project_id: string; kind: "background_image" | "background_video" | "music"; name: string; mime_type: string; size_bytes: number; duration: number | null; width: number | null; height: number | null; has_audio: boolean; url: string };
+type Asset = { id: string; project_id: string; kind: "background_image" | "background_video" | "music"; name: string; mime_type: string; size_bytes: number; duration: number | null; width: number | null; height: number | null; has_audio: boolean; url: string; asset_source?: string; source_url?: string | null; creator_name?: string | null; license_reference?: string | null; license_type?: string | null; attribution_text?: string | null };
+type LibraryAsset = { id: string; kind: "video" | "image" | "audio"; title: string; duration: number | null; size_bytes: number; source: string; url: string };
 type Render = { id: string; project_id: string; job_id: string; status: string; review_status: string; url?: string; download_url?: string; created_at: string };
 type MoodJob = { id: string; status: string; phase: string; progress: number | null; message: string };
 type TextSegment = { id: string; text: string; start: number; end: number; animation: "fade_in" | "fade_out" | "fade_up" | "slide_up" | "gentle_scale" | "none"; animation_duration: number };
@@ -154,17 +155,22 @@ export default function MoodQuotesPage() {
   const timelineGestureRef = useRef<{ id: string; mode: "move" | "resize-start" | "resize-end"; pointerId: number; originX: number; start: number; end: number; blocked: boolean } | null>(null);
   const musicGestureRef = useRef<{ pointerId: number; originX: number; offset: number } | null>(null);
   const timelineDraggedRef = useRef(false);
-  const initialization = useRef<Promise<{ categories: Config; sources: SourceItem[]; projects: ProjectSummary[]; detail: ProjectDetail; id: string | null }> | null>(null);
+  const initialization = useRef<Promise<{ categories: Config; sources: SourceItem[]; projects: ProjectSummary[]; detail: ProjectDetail; id: string | null; assetId: string | null; batch: string }> | null>(null);
   const thumbnailRequest = useRef(0);
   const thumbnailUrlRef = useRef("");
   const declinedManualQuoteEdit = useRef<string | null>(null);
   const styleUndoRef = useRef<{ visual: VisualSettings; text: VisualTextSettings; colors: { color: string; color2: string }; segmentStyles: Record<string, Pick<TextSegment, "animation" | "animation_duration">> } | null>(null);
   const [projectId, setProjectId] = useState("");
+  const [batchId, setBatchId] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [config, setConfig] = useState<Config | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [sourceLibrary, setSourceLibrary] = useState<SourceItem[]>([]);
   const [assets, setAssets] = useState<Asset[]>([]);
+  const [libraryPicker, setLibraryPicker] = useState<"video" | "image" | "audio" | null>(null);
+  const [libraryAssets, setLibraryAssets] = useState<LibraryAsset[]>([]);
+  const [libraryQuery, setLibraryQuery] = useState("");
+  const [libraryLoading, setLibraryLoading] = useState(false);
   const [quotes, setQuotes] = useState<Quote[]>([]);
   const [generations, setGenerations] = useState<ProjectDetail["generations"]>([]);
   const [favorites, setFavorites] = useState<ProjectDetail["favorites"]>([]);
@@ -222,16 +228,22 @@ export default function MoodQuotesPage() {
           request<Config>("/mood-quotes/categories"), request<SourceItem[]>("/sources"), request<ProjectSummary[]>("/mood-projects"),
         ]);
         const id = new URLSearchParams(window.location.search).get("id");
+        const batch = new URLSearchParams(window.location.search).get("batch") || "";
+        const assetId = new URLSearchParams(window.location.search).get("asset_id");
         const detail = id ? await request<ProjectDetail>(`/mood-projects/${id}`) : await request<ProjectDetail>("/mood-projects", { method: "POST", body: JSON.stringify({}) });
-        return { categories, sources, projects: savedProjects, detail, id };
+        return { categories, sources, projects: savedProjects, detail, id, assetId, batch };
       })();
     }
-    initialization.current.then(({ categories, sources, projects: savedProjects, detail, id }) => {
+    initialization.current.then(({ categories, sources, projects: savedProjects, detail, id, assetId, batch }) => {
       if (!alive) return;
       setConfig(categories); setSourceLibrary(sources); setProjects(savedProjects);
-      setProjectId(detail.project.id); applyDetail(detail); setLoaded(true);
+      setProjectId(detail.project.id); setBatchId(batch); applyDetail(detail); setLoaded(true);
       if (!id) router.replace(`/mood?id=${detail.project.id}`, { scroll: false });
       if (!id) void refreshProjects();
+      if (assetId) {
+        setStep(3);
+        void attachLibraryAsset(assetId, detail.project.id).then((attached) => { if (attached) router.replace(`/mood?id=${detail.project.id}`, { scroll: false }); });
+      }
     }).catch((reason) => { if (alive) setError((reason as Error).message); });
     return () => { alive = false; };
   }, []);
@@ -670,7 +682,7 @@ export default function MoodQuotesPage() {
         }
       }
       else { updateBackground("kind", kind === "background_image" ? "image" : "video"); updateBackground("asset_id", asset.id); }
-      setNotice(`${file.name} tersimpan di aset lokal draft.`);
+      setNotice(`${file.name} tersimpan sekali di Asset Library lokal dan ditautkan ke draft.`);
     } catch (reason) { setError((reason as Error).message); }
     finally { setBusy(false); event.target.value = ""; }
   };
@@ -685,8 +697,8 @@ export default function MoodQuotesPage() {
     } catch (reason) { setError((reason as Error).message); }
     finally { setBusy(false); }
   };
-  const chooseMusic = (assetId: string) => {
-    const asset = assets.find((item) => item.id === assetId);
+  const chooseMusic = (assetId: string, supplied?: Asset) => {
+    const asset = supplied || assets.find((item) => item.id === assetId);
     if (!asset) { updateMusic("asset_id", null); return; }
     const duration = asset.duration || composition.music.trim_end;
     if (duration < 0.05) { setError("File musik harus berdurasi minimal 0,05 detik."); return; }
@@ -699,6 +711,30 @@ export default function MoodQuotesPage() {
       return { ...current, music: { ...current.music, asset_id: asset.id, trim_start: start, trim_end: end, fade_in: fadeIn, fade_out: fadeOut } };
     });
     invalidateRender(); setError("");
+  };
+  const openLibraryPicker = async (kind: "video" | "image" | "audio") => {
+    setLibraryPicker(kind); setLibraryQuery(""); setLibraryLoading(true); setError("");
+    try {
+      const response = await request<{ items: LibraryAsset[] }>(`/assets?kind=${kind}&page=1&per_page=100`);
+      setLibraryAssets(response.items);
+    } catch (reason) { setError((reason as Error).message); }
+    finally { setLibraryLoading(false); }
+  };
+  const attachLibraryAsset = async (assetId: string, targetProject = projectId): Promise<boolean> => {
+    if (!targetProject) return false;
+    setBusy(true); setError("");
+    try {
+      const asset = await request<Asset>(`/mood-projects/${targetProject}/library-assets`, { method: "POST", body: JSON.stringify({ asset_id: assetId }) });
+      setAssets((items) => items.some((item) => item.id === asset.id) ? items : [asset, ...items]);
+      if (asset.kind === "music") chooseMusic(asset.id, asset);
+      else {
+        updateBackground("kind", asset.kind === "background_image" ? "image" : "video");
+        updateBackground("asset_id", asset.id);
+      }
+      setLibraryPicker(null); setNotice("Asset siap dipakai; file lokal digunakan tanpa salinan baru.");
+      return true;
+    } catch (reason) { setError((reason as Error).message); return false; }
+    finally { setBusy(false); }
   };
   const render = async () => {
     if (!selected) { setError("Pilih quote sebelum render."); setStep(2); return; }
@@ -958,7 +994,7 @@ export default function MoodQuotesPage() {
   const modeName = "AI Mood Quotes";
 
   return <>
-    <div className="page-intro mood-intro"><Link href="/create" className="back-link"><ArrowLeft size={14}/> Semua mode</Link><div className="eyebrow">KLIPNARA STUDIO · {modeName.toUpperCase()}</div><h1>{draft.title || modeName}</h1><p>Pilih mood, susun quote, lalu buat video lokal tanpa memanggil AI saat edit atau render.</p></div>
+    <div className="page-intro mood-intro">{batchId ? <button type="button" className="back-link mode-back" onClick={() => void saveBeforeNavigate(`/batches/${batchId}`)}><ArrowLeft size={14}/> Kembali ke Batch</button> : <Link href="/create" className="back-link"><ArrowLeft size={14}/> Semua mode</Link>}<div className="eyebrow">KLIPNARA STUDIO · {modeName.toUpperCase()}</div><h1>{draft.title || modeName}</h1><p>Pilih mood, susun quote, lalu buat video lokal tanpa memanggil AI saat edit atau render.</p></div>
     <div className="mood-workspace-head"><div className="mood-draft-picker"><label className="field"><span>Draft tersimpan</span><select value={projectId} onChange={(event) => { if (event.target.value && event.target.value !== projectId) void saveBeforeNavigate(`/mood?id=${event.target.value}`); }}><option value={projectId}>{draft.title || "Draft saat ini"}</option>{projects.filter((item) => item.id !== projectId).map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label><button type="button" className="button button-outline" onClick={() => void saveBeforeNavigate("/mood")}><Plus size={14}/> Draft baru</button></div><span className="autosave-state">{saving ? <><LoaderCircle size={13} className="spin"/> Menyimpan…</> : <><Check size={13}/> Autosave lokal</>}</span></div>
     <nav className="mood-steps" aria-label="Tahapan Mood Quotes">{["Pilih Mood", "Generate Quotes", "Customize", "Preview & Render", "Review & Export"].map((label, index) => <button key={label} type="button" className={step === index + 1 ? "active" : step > index + 1 ? "done" : ""} onClick={() => setStep(index + 1)}><i>{step > index + 1 ? <Check size={13}/> : index + 1}</i><span>{label}</span></button>)}</nav>
     {error && <div className="notice notice-error"><AlertCircle size={16}/><span>{error}</span><button className="icon-button" onClick={() => setError("")} aria-label="Tutup pesan"><X size={14}/></button></div>}
@@ -1019,7 +1055,7 @@ export default function MoodQuotesPage() {
       </details>
       <div className="mood-editor-grid">
         <div className="mood-editor-stack">
-          <details open className="mood-control-group mood-background-group"><summary><Video size={15}/> Background</summary><label className="field"><span>Jenis background</span><select value={composition.background.kind} onChange={(event) => { const kind = event.target.value as Composition["background"]["kind"]; updateBackground("kind", kind); if (kind === "solid" || kind === "gradient") updateBackground("asset_id", null); }}><option value="solid">Warna solid</option><option value="gradient">Gradient</option><option value="image">Gambar</option><option value="video">Video lokal</option></select></label>
+          <details open className="mood-control-group mood-background-group"><summary><Video size={15}/> Background</summary><label className="field"><span>Jenis background</span><select value={composition.background.kind} onChange={(event) => { const kind = event.target.value as Composition["background"]["kind"]; updateBackground("kind", kind); if (kind === "solid" || kind === "gradient") updateBackground("asset_id", null); }}><option value="solid">Warna solid</option><option value="gradient">Gradient</option><option value="image">Gambar</option><option value="video">Video lokal</option></select></label><div className="mood-library-actions"><button type="button" className="button button-outline" onClick={() => void openLibraryPicker("image")}>My Images</button><button type="button" className="button button-outline" onClick={() => void openLibraryPicker("video")}>My Videos</button><Link className="button button-outline" href={`/library?tab=stock&project=${projectId}`}>Stock Footage</Link></div>
           {(composition.background.kind === "solid" || composition.background.kind === "gradient") && <div className="color-pair"><label className="field"><span>{composition.background.kind === "gradient" ? "Warna awal" : "Warna"}</span><input type="color" value={composition.background.color} onChange={(event) => updateBackground("color", event.target.value)}/></label>{composition.background.kind === "gradient" && <label className="field"><span>Warna akhir</span><input type="color" value={composition.background.color2} onChange={(event) => updateBackground("color2", event.target.value)}/></label>}</div>}
           {composition.background.kind === "image" && <><label className="field"><span>Gambar tersimpan</span><select value={composition.background.asset_id || ""} onChange={(event) => updateBackground("asset_id", event.target.value || null)}><option value="">Pilih gambar</option>{assets.filter((asset) => asset.kind === "background_image").map((asset) => <option key={asset.id} value={asset.id}>{asset.name}</option>)}</select></label><label className="asset-upload-button"><Upload size={14}/> Upload JPG, PNG, WebP<input type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" onChange={(event) => void uploadAsset(event, "background_image")}/></label></>}
           {composition.background.kind === "video" && <><label className="field"><span>Video tersimpan</span><select value={composition.background.asset_id || ""} onChange={(event) => updateBackground("asset_id", event.target.value || null)}><option value="">Pilih video</option>{assets.filter((asset) => asset.kind === "background_video").map((asset) => <option key={asset.id} value={asset.id}>{asset.name} · {asset.duration ? formatDuration(asset.duration) : ""}</option>)}</select></label><label className="field"><span>Source Library · pakai file tanpa menyalin</span><select value="" onChange={(event) => void chooseSourceBackground(event.target.value)}><option value="">Pilih video tersimpan…</option>{sourceLibrary.map((source) => <option key={source.id} value={source.id}>{source.name} · {formatDuration(source.duration)}</option>)}</select></label><label className="asset-upload-button"><Upload size={14}/> Upload MP4/MOV<input type="file" accept="video/mp4,video/quicktime,.mp4,.mov" onChange={(event) => void uploadAsset(event, "background_video")}/></label><label className="field"><span>Mulai segmen (detik)</span><input type="number" min="0" max={selectedAsset?.duration || 14400} step="0.1" value={composition.background.video_start} onChange={(event) => updateBackground("video_start", Number(event.target.value))}/></label><label className="check-field"><input type="checkbox" checked={composition.background.loop} onChange={(event) => updateBackground("loop", event.target.checked)}/> Loop background video</label><label className="check-field"><input type="checkbox" checked={composition.background.mute_audio} onChange={(event) => updateBackground("mute_audio", event.target.checked)}/> Mute audio video</label>{!composition.background.mute_audio && <label className="field"><span>Volume audio video · {Math.round(composition.background.audio_volume * 100)}%</span><input type="range" min="0" max="1" step="0.05" value={composition.background.audio_volume} onChange={(event) => updateBackground("audio_volume", Number(event.target.value))}/></label>}</>}
@@ -1051,6 +1087,8 @@ export default function MoodQuotesPage() {
         </div>
       </div>
         {selectedMusic && <div className="mood-music-timeline-controls"><label className="field"><span>Music start offset · {composition.music.offset.toFixed(2)} dtk</span><input type="number" min="0" max={Math.max(0, composition.duration - 0.1)} step="0.05" value={composition.music.offset} onChange={(event) => updateMusic("offset", Number(event.target.value))}/></label><button type="button" className="button button-outline" onClick={() => updateMusic("muted", !composition.music.muted)}>{composition.music.muted ? <VolumeX size={14}/> : <Volume2 size={14}/>} {composition.music.muted ? "Unmute musik" : "Mute musik"}</button><button type="button" className="button button-outline" onClick={() => void togglePreview()}>{playing ? <Pause size={14}/> : <Play size={14}/>} {playing ? "Pause preview" : "Play preview"}</button></div>}
+      <button type="button" className="button button-outline mood-music-library-button" onClick={() => void openLibraryPicker("audio")}>Pilih dari Music Library</button>
+      {(selectedAsset?.source_url || selectedMusic?.source_url || selectedAsset?.license_reference || selectedMusic?.license_reference) && <div className="mood-asset-attribution"><strong>Asal & lisensi media terpilih</strong>{[selectedAsset, selectedMusic].filter((asset, index, list): asset is Asset => Boolean(asset) && list.findIndex((item) => item?.id === asset?.id) === index).map((asset) => <span key={asset.id}>{asset.attribution_text || asset.creator_name || asset.name}{asset.source_url && <> · <a href={asset.source_url} target="_blank" rel="noreferrer">Sumber</a></>}{asset.license_reference && <> · <a href={asset.license_reference} target="_blank" rel="noreferrer">Lisensi</a></>}</span>)}</div>}
       <p className="mood-rights-note"><LockKeyhole size={14}/> Pastikan kamu memiliki hak penggunaan footage dan musik yang diunggah. Klipnara tidak menyertakan atau mengunduh media berhak cipta.</p>
       </div>
       <aside className="mood-live-preview panel" aria-label="Live Preview Mood Quotes">
@@ -1147,16 +1185,17 @@ export default function MoodQuotesPage() {
       </div>
       <div className="mood-render-options"><label className="field"><span>Resolusi export</span><select value={composition.resolution} onChange={(event) => updateComposition("resolution", event.target.value as Composition["resolution"])}><option value="720">720 × 1280 · default</option><option value="1080">1080 × 1920</option></select></label><label className="field"><span>Durasi output · {composition.duration}s</span><input type="range" min="5" max="40" step="1" value={composition.duration} onChange={(event) => updateDuration(Number(event.target.value))}/></label><p>30 FPS · H.264/AAC · MP4. Render tidak memanggil AI, Whisper, atau Ollama.</p></div>
       {job && <div className={`job-progress ${job.status === "failed" ? "job-failed" : ""}`}><div className="job-progress-top"><span className="job-progress-icon">{isRunning ? <LoaderCircle size={17} className="spin"/> : job.status === "completed" ? <CheckCircle2 size={17}/> : <AlertCircle size={17}/>}</span><div><strong>{job.status === "completed" ? "Render selesai" : job.status === "failed" ? "Render gagal" : job.status === "cancelled" ? "Render dibatalkan" : job.phase === "rendering" ? "FFmpeg merender video" : "Menunggu render"}</strong><span>{job.message}</span></div>{isRunning && <button className="button button-quiet" onClick={() => void cancel()}>Batalkan</button>}{["failed", "cancelled"].includes(job.status) && <button className="button button-quiet" onClick={() => void retry()}>Coba lagi</button>}</div>{job.progress !== null && isRunning && <div className="progress-track"><span style={{ width: `${Math.round(job.progress * 100)}%` }}/></div>}</div>}
-      <div className="mood-step-actions"><button className="button button-outline" onClick={() => setStep(3)}><ArrowLeft size={14}/> Edit komposisi</button><button className="button button-primary" disabled={busy || isRunning || !selected} onClick={() => void render()}>{busy ? <LoaderCircle size={15} className="spin"/> : <Video size={15}/>} Render MP4 <ArrowRight size={14}/></button></div>
+      <div className="mood-step-actions"><button className="button button-outline" onClick={() => setStep(3)}><ArrowLeft size={14}/> Edit komposisi</button>{batchId ? <button type="button" className="button button-primary" onClick={() => void saveBeforeNavigate(`/batches/${batchId}`)}>Kembali ke Batch Queue <ArrowRight size={14}/></button> : <button className="button button-primary" disabled={busy || isRunning || !selected} onClick={() => void render()}>{busy ? <LoaderCircle size={15} className="spin"/> : <Video size={15}/>} Render MP4 <ArrowRight size={14}/></button>}</div>
     </section>}
 
     {step === 5 && <section className="panel mood-step-panel"><div className="step-heading"><span className="step-number">05</span><div><h2>Review & export</h2><p>Periksa video final, setujui file berdasarkan fingerprint, lalu unduh MP4.</p></div></div>
-      {activeRender?.url ? <div className="mood-final-video"><video src={`${API}${activeRender.url}`} controls playsInline/><div className="mood-final-meta"><span className={`review-status-chip review-${activeRender.review_status.replace("_", "-")}`}>{activeRender.review_status === "approved" ? "Disetujui" : activeRender.review_status === "needs_revision" ? "Perlu Revisi" : "Perlu Review"}</span><span>{activeRender.status === "needs_render" ? "Komposisi berubah; render lama masih tersedia." : "H.264 · AAC · 9:16"}</span></div><div className="mood-step-actions"><button className="button button-outline" onClick={() => void review("needs_revision")}><RotateCcw size={14}/> Perlu revisi</button><button className="button button-primary" onClick={() => void review("approved")}><CheckCircle2 size={14}/> Setujui video</button><a className="button button-outline" href={`${API}${activeRender.download_url}`}><Download size={14}/> Download MP4</a></div></div> : <div className="mood-empty-state"><Video size={22}/><strong>Belum ada render final</strong><span>Atur komposisi lalu render MP4. Draft dan quote sudah tersimpan.</span><button className="button button-primary" onClick={() => setStep(selected ? 4 : 2)}>Lanjutkan</button></div>}
+      {activeRender?.url ? <div className="mood-final-video"><video src={`${API}${activeRender.url}`} controls playsInline/><div className="mood-final-meta"><span className={`review-status-chip review-${activeRender.review_status.replace("_", "-")}`}>{activeRender.review_status === "approved" ? "Disetujui" : activeRender.review_status === "needs_revision" ? "Perlu Revisi" : "Perlu Review"}</span><span>{activeRender.status === "needs_render" ? "Komposisi berubah; render lama masih tersedia." : "H.264 · AAC · 9:16"}</span></div><div className="mood-step-actions"><button className="button button-outline" onClick={() => void review("needs_revision")}><RotateCcw size={14}/> Perlu revisi</button><button className="button button-primary" onClick={() => void review("approved")}><CheckCircle2 size={14}/> Setujui video</button><a className="button button-outline" href={`${API}${activeRender.download_url}`}><Download size={14}/> Download MP4</a><Link className="button button-outline" href={`/publishing?content_type=mood_render&content_id=${activeRender.id}`}><Youtube size={14}/> Publishing Studio</Link></div></div> : <div className="mood-empty-state"><Video size={22}/><strong>Belum ada render final</strong><span>Atur komposisi lalu render MP4. Draft dan quote sudah tersimpan.</span><button className="button button-primary" onClick={() => setStep(selected ? 4 : 2)}>Lanjutkan</button></div>}
       {renders.length > 1 && <details className="mood-history"><summary><Clock3 size={14}/> Riwayat render · {renders.length}</summary><div className="mood-history-list">{renders.map((item) => <div key={item.id}><span><strong>{item.status} · {item.review_status.replace("_", " ")}</strong><small>{new Date(item.created_at).toLocaleString("id-ID")}</small></span>{item.download_url && <a className="button button-outline" href={`${API}${item.download_url}`}><Download size={13}/> Download</a>}</div>)}</div></details>}
       <div className="mood-step-actions"><button className="button button-outline" onClick={() => setStep(4)}><ArrowLeft size={14}/> Kembali ke preview</button><button className="button button-outline button-danger" onClick={() => setConfirmDelete(true)}><Trash2 size={14}/> Hapus draft</button><button className="button button-outline" onClick={async () => { try { await persist(); setNotice("Draft tersimpan di perangkat."); } catch (reason) { setError((reason as Error).message); } }}><Save size={14}/> Simpan draft</button></div>
     </section>}
 
     <div className="mood-workspace-footer"><span>{selected ? `Quote dipilih: ${selected.title}` : "Pilih quote untuk membuka editor video"}</span><Link href="/clips" className="text-link">Video Library <ArrowRight size={13}/></Link></div>
+    {libraryPicker && <div className="modal-backdrop" role="presentation" onClick={(event) => { if (event.target === event.currentTarget) setLibraryPicker(null); }}><section className="mood-library-modal" role="dialog" aria-modal="true" aria-labelledby="mood-library-title"><button type="button" className="icon-button asset-modal-close" onClick={() => setLibraryPicker(null)} aria-label="Tutup"><X size={16}/></button><div className="eyebrow">SHARED LOCAL ASSETS</div><h2 id="mood-library-title">Pilih {libraryPicker === "audio" ? "musik" : libraryPicker === "image" ? "gambar" : "video"} dari Asset Library</h2><label className="search-box"><Search size={15}/><input placeholder="Cari asset…" value={libraryQuery} onChange={(event) => setLibraryQuery(event.target.value)}/></label>{libraryLoading ? <div className="asset-loading"><LoaderCircle size={17} className="spin"/> Memuat asset…</div> : <div className="mood-library-list">{libraryAssets.filter((item) => `${item.title} ${item.source}`.toLowerCase().includes(libraryQuery.toLowerCase())).map((item) => <article key={item.id}><span className="mood-library-item-icon">{item.kind === "audio" ? <Music2 size={17}/> : item.kind === "image" ? <Image size={17}/> : <Video size={17}/>}</span><div><strong>{item.title}</strong><small>{item.source === "pexels" ? "Pexels · " : "Lokal · "}{item.duration ? `${formatDuration(item.duration)} · ` : ""}{formatBytes(item.size_bytes)}</small>{item.kind === "audio" && <audio controls preload="none" src={`${API}${item.url}`} aria-label={`Preview ${item.title}`}/>}</div><button type="button" className="button button-outline" disabled={busy} onClick={() => void attachLibraryAsset(item.id)}>Gunakan</button></article>)}</div>}{!libraryLoading && !libraryAssets.length && <div className="mood-empty-state"><strong>Belum ada asset</strong><span>Upload di editor atau tambah file lewat Asset Library.</span></div>}<Link className="button button-quiet" href={`/library?tab=${libraryPicker === "audio" ? "audio" : libraryPicker}&project=${projectId}`}>Buka Asset Library <ArrowRight size={13}/></Link></section></div>}
     {confirmDelete && <div className="modal-backdrop" onClick={(event) => { if (event.target === event.currentTarget) setConfirmDelete(false); }}><section className="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="delete-mood-title"><span className="confirm-icon"><Trash2 size={18}/></span><h2 id="delete-mood-title">Hapus Mood Quotes draft?</h2><p><strong>{draft.title}</strong>, aset lokal, riwayat quotes, dan render terkait akan dihapus. Tindakan ini tidak dapat dibatalkan.</p><div><button className="button button-outline" onClick={() => setConfirmDelete(false)}>Batal</button><button className="button button-danger" onClick={() => void confirmProjectDelete()}>Hapus draft</button></div><button className="modal-close icon-button" aria-label="Tutup" onClick={() => setConfirmDelete(false)}><X size={14}/></button></section></div>}
   </>;
 }

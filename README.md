@@ -65,6 +65,7 @@ YouTube live credentials are not configured in this checkout; automated publishi
 | [AI Pipeline](docs/ai-pipeline.md) | Whisper, Ollama/cloud adapters, chunking, cache, benchmarks and limits |
 | [Video Processing](docs/video-processing.md) | Import safeguards, storage, FFmpeg render, encoder benchmarks |
 | [API and Database](docs/api-and-database.md) | Endpoints, request contracts, schema, statuses and worker queue |
+| [Git Workflow & Commit Standards](docs/GIT_WORKFLOW.md) | Mandatory review, staging, Conventional Commits, authorization, and push rules |
 | [Testing and Troubleshooting](docs/testing-and-troubleshooting.md) | Automated checks, recorded/live test boundaries and diagnostics |
 | [YouTube Shorts Publishing](docs/youtube-shorts-publishing.md) | Google Cloud/OAuth setup, resumable upload and reconciliation |
 | [Roadmap](docs/roadmap.md) | Product direction and planned-vs-implemented boundary |

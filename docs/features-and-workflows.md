@@ -1,25 +1,76 @@
 # Features and Workflows
 
-This page describes workflows present in current source. **Buat Video** is the multi-mode entry point: Quick Clip, AI Smart Clip, AI Mood Quotes, and a disabled YouTube Clip card marked Segera Hadir. Quick Clip remains the default inside the clip workflow. Cloud transcription is **planned**, not implemented; see [Roadmap](roadmap.md).
+This page describes workflows present in current source. **Buat Video** is the multi-mode entry point: Quick Clip, AI Smart Clip, YouTube Clip, and AI Mood Quotes. Quick Clip remains the default inside the clip workflow. V2.8 adds subtitle/translation drafts; V2.9 adds Batch Creator; V2.11 adds YouTube Publishing Studio for individually approved Clip and Mood outputs; V3.1 adds YouTube Analytics; V3.2 adds conditional TikTok/Instagram API actions and manual export.
 
 ## Multi-mode create entry
 
-`/create` shows working Quick Clip, AI Smart Clip, and AI Mood Quotes paths. Quick Clip and AI Smart Clip share the source workflow and existing source/editor/review routes. AI Mood Quotes opens its own `/mood` wizard. YouTube Clip is visibly unavailable; no YouTube downloader or active-looking placeholder button is present. Existing OAuth publishing remains separate and applies only to supported source-backed clips.
+`/create` shows working Quick Clip, AI Smart Clip, YouTube Clip, and AI Mood Quotes paths. Quick Clip, AI Smart Clip, and YouTube Clip share existing source/editor/review routes; YouTube Clip adds URL preview, timestamp selection, and an optional local segment adapter. AI Mood Quotes opens its own `/mood` wizard. YouTube Publishing Studio uploads approved Clip or Mood render records through one OAuth/resumable uploader; both retain separate review fingerprints and no fake source rows are created. Analytics runs in the same Studio and reuses verified YouTube accounts and publication IDs.
+
+## Batch Creator V2.9
+
+`/batches` builds up to 10 Video Clips from explicit source timestamps or Mood Quotes from the current saved quote, generated history/favorites, or user-entered text. Creating a Mood batch does not generate quotes or call AI. Each item gets its own existing Clip Editor or Mood Quotes draft; shared Video Clips export settings seed non-custom items, while per-item edits remain supported.
+
+Start queues only the next child render. Existing FIFO worker and source clip/Mood renderer process each batch serially; pause waits for active render to finish, resume continues pending items, cancel preserves completed MP4s, and retry creates a fresh item render. Batch/item state, render snapshots, and fingerprints live in additive SQLite tables and recover to paused/retryable state after backend restart. Every output keeps existing individual review/approval and download flow; nothing auto-publishes.
+
+Mood items reference shared Asset Library media without copying bytes. Project-owned legacy Mood assets are rejected until re-linked to shared assets. Removing a batch record preserves item drafts and MP4s; removing an individual pending item is blocked once its MP4 exists. A Video Clips batch keeps its source referenced until the batch record is removed, preventing accidental source deletion. Batch outputs must be reviewed and published one at a time; no batch auto-publish.
 
 ## Source selection
 
 1. **Import:** browser submits MP4/MOV upload, selects stored source, or imports direct URL. Backend checks size, free space, file format, video codec, duration and audio metadata via ffprobe. Audio is optional for Quick Clip; AI Smart Clip requires audio when transcription cache misses. URL ingest requires public HTTPS media response on port 443, resolves/pins public IP, validates each redirect (maximum three), and rejects site pages/private addresses.
 2. **Persist:** source file is written under managed source root; `sources` row holds metadata, hash, and later transcript cache. Original media remains separate from generated clips.
 
+## V2.7 Asset Library
+
+`/library` now contains Stock Footage, My Videos, My Images, My Music, and Favorites. Video stays canonical in `sources` and gains shared metadata in `library_assets`; image/audio files live once under managed local storage. Hash-identical uploads reuse existing records. Storage usage, type/search/favorite filters, music mood tags, attribution/license notes, source links, and reference-aware delete checks are exposed in the UI.
+
+Stock Footage uses official Pexels video search only after a user enters a query. Search, orientation, size, and duration filters return metadata/thumbnails; selected videos can be previewed, favorited, and imported one at a time as MP4. Import caps at 512 MiB, validates pinned public HTTPS media and ffprobe output, stores one ordinary Source Library file, and does not trigger transcript, AI analysis, or Quick Clip creation. User can then open normal editor or attach that source to Mood Quotes.
+
+Mood Quotes can pick shared videos/images/music or link Stock Footage from its editor. Mood rows link `library_assets`/`sources` by ID; they never copy shared bytes. Newly uploaded Mood media also enters shared library. Existing project-owned Mood files remain project-scoped and are not migrated. Deleting a draft removes only legacy project-owned files and project references; shared media survives. Deleting media still attached to any draft is blocked until detached. Pexels creator, source page, license reference, and attribution remain visible for review; users remain responsible for license terms and people/logo/property rights.
+
+`PEXELS_API_KEY` is optional and backend-only. Missing key or provider errors are surfaced; search, current preview, saving a favorite, and import require network access, while listing/removing saved favorites, local library playback, and Mood rendering stay local. Pexels search-result cache is bounded/in-memory; saved favorites and imported metadata are local SQLite rows. No bulk download, scraping, cloud media store, or import of unselected videos is implemented.
+
+## YouTube Clip
+
+1. Paste a standard URL: `youtube.com/watch?v=VIDEO_ID`, `www.youtube.com/watch?v=VIDEO_ID`, `m.youtube.com/watch?v=VIDEO_ID`, `youtu.be/VIDEO_ID`, or `youtube.com/shorts/VIDEO_ID`. Parser accepts exact YouTube hostnames only, validates 11-character video IDs, canonicalizes to `https://www.youtube.com/watch?v=...`, and reads valid `t`/`start` timestamps; sharing parameter `si` and other extras cannot replace video ID. Malicious lookalike hosts, credentials, ports, unsupported paths, and malformed IDs are rejected.
+2. **Preview & Trim:** browser loads official YouTube IFrame Player API for playback, seeking, playhead capture, and selected-interval replay. Start/End accept `MM:SS` or `HH:MM:SS`; player pauses at End within polling/API precision. Known duration bounds range. When duration is unavailable, UI says original duration is unchecked. IFrame seek/trim timing is approximate.
+3. Frontend sends `POST /api/youtube-clips/metadata` through its API client to FastAPI. Optional `YOUTUBE_DATA_API_KEY` fetches title/channel/thumbnail/duration from official Data API; response is transient. Provider failure leaves preview available. App-route HTTP 404 means frontend/backend route or base-URL mismatch, not video unavailability. Player errors distinguish unavailable/restricted (`100`) from disabled embed (`101`/`150`).
+4. **Impor Sumber Video:** primary action is **Impor & Buat Klip** when local adapter is explicitly enabled, installed, and user confirms rights. Adapter validates canonical URL/ID and selected timestamps, asks yt-dlp for `--download-sections`, validates resulting MP4 with ffprobe, enforces configured size cap (2 GiB default) and four-hour duration cap, and stores it as managed Source Library media. Successful import automatically calls existing Quick Clip endpoint with full imported segment, creating the ordinary clip/render job; user reaches existing Clip Editor. This current pipeline queues initial render before editor navigation. Import progress is Preparing → Importing → Processing → Ready; cancellation, retry, precise errors, and local-file fallback are available.
+5. Adapter is optional and disabled by default. `yt-dlp` is not official YouTube tooling, and using it may be disallowed by applicable YouTube terms even when user owns content. User must verify rights and method permission; checkbox is an attestation, not legal verification. No browser cookies, session credentials, login, DRM bypass, or access-control workaround is used. Private/age/geo/restricted/unavailable formats fail closed with local-source fallback. Partial transfer is format/server-dependent and may transfer more than selected interval; import is never guaranteed. If adapter is unavailable or unsuitable, select permitted MP4/MOV from Source Library or upload.
+6. **Quick Clip fallback:** local source uses selected original timestamps; backend re-probes current local duration. It does not compare local content with YouTube preview. Automatic segment import records original YouTube timestamps and `source_association=auto_imported`; local fallback records `user_selected`. Existing FFmpeg renderer, Clip Editor, review/approval, Video Library, and publishing continue unchanged. No old source or draft is deleted.
+
+Quick Clip provenance (canonical URL, video ID, original selected times, and `source_association`) lives in existing Quick Clip `jobs.options_json`; no clips/jobs migration. Data API metadata stays transient. Import operation state uses additive `youtube_import_jobs` table; imported media is an ordinary `sources` row. Editor distinguishes automatically imported segment from user-selected local source and can clear reference; deleting clip does not delete source file.
+
 ## Quick Clip (default)
 
 1. Choose uploaded MP4/MOV, direct URL import, or source already in Video Library.
 2. Preview original source; enter Start/End in `MM:SS` or `HH:MM:SS`, or capture either value from video playhead.
-3. Backend validates finite `0 <= start < end <= source.duration`; there is no product-imposed maximum clip length. User enters title and chooses 720p (default) or 1080p. Output aspect is fixed portrait 9:16; initial subtitle setting is off.
+3. Backend validates finite `0 <= start < end <= source.duration`; single-scene Quick Clip has no product-imposed maximum clip length. Multi-Scene editor separately caps output at 180 seconds. User enters title and chooses 720p (default) or 1080p. Output aspect is fixed portrait 9:16; initial subtitle setting is off.
 4. `POST /api/sources/{id}/quick-clips` creates a `quick_clip` job and ordinary `clips` row in one SQLite transaction. It does not create a transcript, AI candidate, fake transcript, or AI usage record.
 5. Existing single worker sends only selected in/out to FFmpeg; after render user can open same Clip Editor, approve/revise, download or publish through YouTube flow.
 
-Quick Clip never calls `transcribe`, `count_prompt_tokens`, `analyze`, Ollama, OpenAI or Gemini. It works with a silent source. Renderer creates a silent stereo AAC track (`anullsrc`) for silent input so final H.264/AAC review/YouTube contract stays valid. Quick Clip subtitles remain unavailable without a transcript; subtitle toggle is disabled in that case.
+Quick Clip creation/render still never calls `transcribe`, `count_prompt_tokens`, `analyze`, Ollama, OpenAI or Gemini. In Clip Editor, subtitle mode defaults Off; Manual supports stable-ID text/timing segments without a transcript. V2.8 Transcribe queues the full saved composition and offers local Whisper, consent-gated Gemini word timing, or consent-gated OpenAI text-only transcription. The legacy synchronous `/subtitles/auto-generate` endpoint remains for selected trim/scene compatibility. Silent sources show a clear message; Manual remains available. Renderer adds silent stereo AAC (`anullsrc`) only to silent output and does not alter source audio.
+
+## V2.6 Multi-Scene Clip Editor and Cut Range
+
+**Status: implemented in source; automated checks and manual runtime QA not run for this revision.** Quick Clip still opens as a single interval. Switch the same editor to Multi-Scene to add source ranges, reorder, trim, split, duplicate, delete, and tag one Hook/Ending. One source file supplies every scene; source time is stored on each scene and output time is derived from cumulative duration in scene order. Scene IDs remain stable when order changes.
+
+The output timeline supports drag selection or **Tandai Awal / Tandai Akhir** at the output playhead. **Hapus Bagian** removes the selected output interval non-destructively, splits intersected source ranges, then ripples later scenes left. **Split** divides the active scene at playhead. Undo/Redo stores at most 40 edit snapshots; shortcuts are `I`, `O`, `S`, `Delete`, `Ctrl+Z`, `Ctrl+Y`, and `Ctrl+Shift+Z` when focus is outside text/controls. Draft autosave stores the full edit object in existing `clips.edit_json` and resumes on editor load. The source MP4 is never rewritten or deleted by these operations.
+
+Composition preview uses browser seeks over the selected source intervals in output order; it does not make an FFmpeg preview render. Final rendering uses the existing FIFO job and immutable edit snapshot. Each scene is timestamp-reset, cropped/scaled to 9:16, frame-rate normalized, and concatenated as hard cuts. Video/audio segments use matching durations; missing source audio becomes silence. Crossfades are not implemented.
+
+Subtitle segment timebase is explicit: legacy/single-scene captions remain candidate-relative; Multi-Scene captions use source seconds. Renderer intersects each caption with each retained scene and derives output timestamps in order. Captions crossing a cut are clipped; intentional repeated source ranges repeat their captions. Audio settings follow the same scene order: original audio and volume are default; mute, fade-in/out, optional `loudnorm`, limiter, and target LUFS apply during render. Export choices are 720p/1080p, 30/60 FPS, and Smaller/Balanced/High; MP4 remains H.264/AAC and goes through existing review/publishing gates.
+
+Title overlay is opt-in and supports text, system font, size, color, vertical position, duration, and fades. Hook is a manual scene label, not a virality promise. Ending warning is a duration heuristic only; it does not infer semantics. Multi-Scene limits: one source, 12 scenes maximum, 0.5 seconds minimum per interval, and 180 seconds maximum output. Browser source seeking has latency; hard cuts only; source video with burned-in subtitles cannot be cleaned by overlay controls.
+
+## V2.10 Unified Clip Editor workspace
+
+**Status: implemented in source; automated state assertions are added but not run; manual browser QA remains pending.** Quick Clip, AI Smart Clip, and YouTube Clip outputs continue through the same `/clips/[id]` editor. The page places trim/crop/subtitle/audio/title/export groups beside one browser composition preview on desktop. Portrait frame keeps 9:16; editing style does not remount the video or invoke FFmpeg. The browser preview uses current draft overlays and source seeks; final MP4 still comes from existing FFmpeg render job.
+
+The preview stays sticky below the 62px global topbar on wide layouts and ends at the editing workspace boundary. It offers Play/Pause, Replay, seek/time, preview-only mute, fullscreen, source/render switch, and collapse. A selected old MP4 is labeled outdated when draft differs. At widths up to 1080px, preview moves above controls and stops sticking; mobile can collapse it to keep controls reachable. Timeline remains below the workspace, retains the shared `compositionTime` playhead and all existing scene/cut/subtitle operations, and can collapse independently.
+
+Save status is derived from current edit JSON, successful PATCH response, in-flight save, and failed snapshot: Saved is never shown for a pending draft. Existing serialized autosave and stale-snapshot guard remain. Render-required/outdated status uses current draft, render status, and output availability; review approval/fingerprint rules and publishing conditions remain unchanged. Audio/crop/title/export callbacks and `clips.edit_json` persistence are unchanged. No backend, schema, or media-processing change was made.
+
+Mood Quotes retains its separate Live Preview workspace; no migration to the clip editor was made. The app currently has light-theme tokens only; no dark-theme behavior is claimed. See [Design](design.md) and V2.10 manual checklist in [Testing](testing-and-troubleshooting.md).
 
 ## AI Smart Clip (optional)
 
@@ -40,11 +91,11 @@ If transcript cache matches language/config/model fingerprint, it is reused. Oth
 9. Live Preview applies browser transforms/filters and follows playhead/segment animation; music preview follows offset, trim, loop, fades, and mute. Video background uses one cached static thumbnail with simulated motion; **Preview Penuh** plays real video/audio. FFmpeg renders the saved composition snapshot through existing renderer; H.264/AAC MP4 at 720p or optional 1080p, stream/duration/resolution/audio checks, progress/cancel/retry, prior output preserved until replacement succeeds. Browser/libass text wrapping and color/grain treatment can differ slightly; compare final MP4 manually. No selected music means background audio or silent AAC; mood/music recommendations never select/download music. Volume zero intentionally permits silence.
 10. Review is independent of render state. Approval stores SHA-256 for valid H.264/AAC output; edit changes invalidate approval. Download is available in Mood Quotes and Clip Library; drafts can be reopened/deleted with local uploads.
 
-Mood Quotes uses dedicated project/render tables because it has no source video/clip FK. It does not create a fake source or clip. A Source Library background is referenced with a restricting FK and is never deleted with the Mood Quotes project. Music and uploaded footage remain local; users must have rights to use them. Mood Quotes does not yet expose YouTube publishing; no fake Publish control is shown.
+Mood Quotes uses dedicated project/render tables because it has no source video/clip FK. It does not create a fake source or clip. A Source Library background is referenced with a restricting FK and is never deleted with the Mood Quotes project. Music and uploaded footage remain local; users must have rights to use them. Approved Mood render records appear in YouTube Publishing Studio through a source-less job row and the shared uploader.
 
 ## Shared review and render
 
-Candidate AI clips and Quick Clips appear with source/candidate labels. Human review uses `review_status=needs_review` initially. User inspects source/final output in shared Clip Editor, changes trim/crop/subtitles where a transcript exists, then renders/approves/revises.
+Candidate AI clips and Quick Clips appear with source/candidate labels. Human review uses `review_status=needs_review` initially. User inspects source/final output in shared Clip Editor, changes trim/crop/subtitles, then renders/approves/revises. Single-scene subtitle segments use seconds relative to candidate clip start; Multi-Scene segments use source seconds and renderer maps them to current output order.
 
 ## Clip editing, render, approval
 
@@ -55,36 +106,73 @@ Candidate AI clips and Quick Clips appear with source/candidate labels. Human re
 | Generate job terminal state | `ready_for_review` | Candidates exist; not same as clip review approval |
 | Render job terminal state | `completed`, `failed`, `cancelled` | FFmpeg job result |
 
-Render creates portrait H.264/AAC MP4. User can adjust trim, crop, subtitle enable/style/size/color/position and per-segment text overrides. Transcription and candidate analysis are reused; edit/rerender does not rerun AI. Old rendered MP4 remains until replacement succeeds.
+Render creates portrait H.264/AAC MP4. User can adjust trim, crop, subtitle mode, cue text/timing, caption mode/style, and preview with play/pause/seek. Single-scene subtitle times stay candidate-relative; Multi-Scene times use source seconds; output-time tracks bind to the current composition fingerprint. Source-time captions remap after reorder/cuts; stale output tracks cannot render. Subtitle edits autosave and restore on reopen. Old rendered MP4 remains until replacement succeeds.
+
+### V2.8 subtitle workflow
+
+1. Choose **Transcribe** to queue local Whisper, Gemini, or OpenAI for the saved composition scene order/ranges. Local Whisper returns segment timing. Gemini requests word timestamps/speaker labels (maximum 30 minutes). OpenAI `gpt-transcribe` returns text only; users must time those cues manually.
+2. Cloud audio requires explicit confirmation per request; translation has separate confirmation and sends subtitle text only. Backend checks consent. No automatic provider fallback.
+3. Results remain separate draft tracks until user selects **Use track**. Import SRT/VTT also creates a review draft. Translation stays a separate track and becomes outdated if source cue IDs/text/timing change.
+4. Edit/add/split/merge/duplicate/remove cues, map source/clip-time cues to output time, and drag/resize output-time cues in timeline. Import/export supports SRT/VTT; caption controls include sentence/phrase/word/karaoke, presets, font, color, outline, highlight, alignment, animation, safe margins, width, and background.
+
+### V2.12 Word Pop
+
+Word Pop is a subtitle type, separate from appearance presets. It displays one reviewed word at a time, with punctuation attached, source/output timebase preserved, and silence gaps left blank. Gemini word-timestamp tracks may be used; local Whisper's segment timing and OpenAI's text-only transcript never receive invented word times. Manual alignment starts with untimed tokens; edit each word's text/start/end, seek to audio, add/remove/split/merge words, then explicitly mark cue alignment reviewed. Changing cue text or timing invalidates review while keeping stored words available for correction.
+
+Word Pop is selectable only when every cue intersecting current composition has reviewed, one-to-one word text/timing inside its cue with no within-cue overlap. Missing/invalid timing blocks selection or render; translated/bilingual display is unsupported. Source/clip-time word intervals map through scene cuts and repeats; output-time drafts still use composition fingerprints. ASS emits one event per mapped word, clips events at cut boundaries, scales long words to safe width, and uses 10 ms timestamp precision; intervals too short to represent fail instead of disappearing. Pop, Scale, Fade, and None operate per word, with reduced-motion support in browser preview. Subtitle presets, including Word Pop appearance preset, alter appearance only and never change type. Preview and FFmpeg may differ by frame quantization/font metrics; compare final MP4 manually.
+
+Output-time tracks are tied to composition ranges and source hash; scene/trim/order changes mark them stale. Selecting a stale track blocks render; inactive stale drafts remain reviewable/removable. Generated tracks never replace active captions automatically. No SQLite migration is used; drafts and style stay in `clips.edit_json`.
 
 Review endpoint accepts `approved` or `needs_revision` only when final render is completed and a nonempty H.264/AAC MP4 passes ffprobe. Approval records SHA-256 of exact output. Changed saved edits or any render request resets approval/fingerprint; render completion remains `needs_review`. A legacy approved record without fingerprint is reset during migration.
 
 ## YouTube publishing workflow
 
-1. Connect a YouTube channel from **Akun**. Google grants `youtube.upload`; tokens stay encrypted/server-side.
-2. In Clip Editor, approved completed output exposes **Posting ke YouTube**. Backend repeats approval, render, file hash and Shorts eligibility validation.
-3. User previews final video; enters title (required), description, tags; chooses privacy (Private default), explicit Made for Kids answer, and explicit synthetic-content answer.
-4. A confirmation step enqueues publication in the existing worker.
-5. **Publishing History** shows publication status and acknowledged upload bytes. Upload uses resumable sessions; unknown outcome is reconciled before retry. YouTube processing status is polled only when worker queue is idle.
+1. Connect a YouTube channel from **Akun**. Google grants `youtube.upload` for publishing and `youtube.readonly` for authorized `channels.list(mine=true)` identity lookup; tokens stay encrypted/server-side. Use **Hubungkan Channel Lain** to connect additional Google identities; OAuth requests `prompt=select_account`. A grant exposing multiple channels still fails closed; account identity can be reverified.
+2. Open **YouTube Studio** or an approved output's link from Batch Creator. Studio lists completed Clip and Mood renders; backend repeats each output's review, file hash and Shorts eligibility gates. Batch items stay individually reviewed and published.
+3. Preview output; enter title, description, tags/hashtags, category/language, privacy, and required Made for Kids/synthetic-media declarations. Save metadata drafts/templates without queueing.
+4. Optional native YouTube schedule uses timezone-aware future time and Private visibility. UI converts browser-local time to UTC; YouTube owns publication timing. Optional JPEG/PNG thumbnail stays local until applied to a known uploaded video.
+5. Select one or more verified YouTube channels. Shared metadata can be overridden per channel; review summary shows each destination's title, schedule, and required declarations before explicit publish/rights confirmation. Each selected channel gets independent publication/job history.
+6. Queue, History, Calendar and event details show upload bytes, remote processing/scheduled/published state and errors. Unknown upload outcome is reconciled before retry; remote processing is polled only when worker queue is idle.
 
-Publication statuses are `pending`, `uploading`, `processing`, `published`, `failed`, `cancelled`; review/render states remain separate. Pending/uploading clip cannot be edited, rerendered, re-reviewed, or deleted. Cancel accepted only before upload may have sent bytes. A known video ID can be rechecked without sending a second upload. Expired session after possible bytes with no recovered ID blocks retry pending manual YouTube Studio reconciliation.
+Publication lifecycle statuses are `pending`, `uploading`, `processing`, `published`, `failed`, `cancelled`; separate `remote_status` records upload/processing/scheduled/published state. Review/render states stay independent. Clip pending/uploading outputs and Mood projects with pending/uploading publications cannot be deleted. Cancel is accepted only before upload may have sent bytes. A known video ID can be rechecked without sending a second upload. Expired session after possible bytes with no recovered ID blocks retry pending manual YouTube Studio reconciliation. Thumbnail state is `applied` only after YouTube returns a thumbnail resource.
+
+## TikTok and Instagram workflow V3.2
+
+1. **Connected Accounts** shows conditional readiness from actual OAuth scopes and account method, not provider app review or future eligibility. Without credentials/scopes, choose manual export; it still requires approved current MP4, explicit confirmation, and platform-specific rights confirmation.
+2. TikTok OAuth requests `user.info.basic` and `video.upload`, never `video.publish`. Select **Transfer to TikTok Inbox** only for a verified account and supported media. Caption/privacy options stay local; creator reviews metadata and finishes posting in TikTok. `SEND_TO_USER_INBOX` means creator action required, not Published. Only `PUBLISH_COMPLETE` is provider-confirmed Published. Direct Post and TikTok scheduling stay disabled.
+3. Instagram API publishing requires eligible Professional account linked to a Facebook Page, granted permissions/Page authorization, and Facebook Login for Business. Local resumable upload creates a Reels container, transfers bytes to `rupload.facebook.com`, checks processing, then calls `media_publish`. `FINISHED` means container ready; Published requires provider-confirmed publication. Instagram Login `video_url` and scheduling are not used.
+4. Each platform job has own account, metadata snapshot, media fingerprint, progress, errors, events, cancel/retry, and reconciliation. Worker rechecks review fingerprint, media, account status/scopes before transfer. Interrupted or ambiguous provider requests require reconciliation; unknown state is never automatically resent. Rights and duplicate-risk confirmation apply to retries.
+5. History distinguishes manual export, TikTok Inbox action, and Instagram API publication. Manual export means no upload. Social statuses never alter YouTube history, schedule, or Analytics. Local manual export remains available.
+6. Connect additional social identities with **Hubungkan Akun Lain**, set one convenience default per provider, select one or more stable account IDs in Publishing Studio, and edit drafts per account. Each destination queues independently. Disconnect cancels queued jobs for that destination; already-started work may need provider reconciliation. Local history stays intact.
+
+Live scopes, app review, provider eligibility, and account publishing were unavailable and remain unverified here. See V3.2 checklist in [Testing](testing-and-troubleshooting.md).
+
+## YouTube Analytics V3.1
+
+1. Connect or reconnect channel using existing OAuth. `youtube.upload` and `youtube.readonly` remain publishing/identity requirements. **Aktifkan Analytics** uses incremental consent for verified channel, requests `yt-analytics.readonly` plus `youtube.readonly`, and verifies returned channel ID before updating credentials. Granted scopes come from Google response/token-info verification; missing or narrower grants never overwrite a broader stored grant. No monetary scopes are requested.
+2. Open **Analytics** in Publishing Studio. Select verified Analytics-enabled channel and date range (up to 366 inclusive days; current UTC day is excluded). **Sync now** bypasses six-hour local cache; normal navigation reuses cache. Cache belongs to local SQLite, expires after 30 days, and clears on disconnect. Provider errors are surfaced without showing credentials or raw OAuth responses.
+3. **Channel** scope reports channel-wide totals. **Klipnara** scope filters to YouTube video IDs from successful Klipnara publication rows; it never presents these as full-channel totals. `views` and `engagedViews` remain separate. Tables may show channel videos without attribution; only linked publication records can open Klipnara video detail/retention.
+4. Report provides daily metrics, video details, previous equal-length period comparisons, and optional audience-retention points. YouTube report coverage may lag selected dates; UI displays actual coverage. Retention is one video per API request and may be empty. CSV export is generated locally from returned metrics; values are formula-escaped.
+5. New publication rows store immutable production snapshot (`attribution_json`) with workflow, subtitle/caption/visual presets, scene count, render metadata, and sanitized audio settings. Batch/mood provenance is captured on new records; older publication rows have no retroactive snapshot and show as unattributed. Rule-based insights require at least five videos per compared group, describe medians only, and do not claim causation. No AI or generated metrics are used.
+
+Analytics responses and caches remain local. Channel/account ID is selected from existing account records; API has no arbitrary-channel query. Disconnect deletes that channel's cached reports, not publication history. No scraping, monetary analytics, second OAuth system, or upload estimates.
 
 ## Privacy and data boundaries
 
 - Local model path: source video → local FFmpeg audio extraction → local whisper.cpp → local Ollama by default → SQLite/local MP4.
-- Cloud AI options are explicit per job. OpenAI/Gemini receive transcript-based prompts, not media file/audio. No automatic local/cloud provider fallback.
+- Cloud highlight analysis receives transcript text only after consent. V2.8 cloud subtitle STT uploads composition audio only after separate explicit confirmation; translation sends subtitle text only. Local STT stays local. No provider fallback.
 - Mood Quotes sends only quote-generation text fields to the selected cloud provider after request-specific consent. Background and music remain local, and render runs offline after quotes are saved.
-- YouTube receives video and manually entered metadata through official API only after approval and confirmation.
+- YouTube IFrame preview runs in browser. Optional Data API metadata request is backend-only and transient. Optional `yt-dlp` import is local, opt-in, user-triggered, and never represented as official YouTube functionality. Publishing separately uploads the approved local render through official API only after approval and confirmation.
 - No telemetry or product analytics are implemented.
 
 ## Current limits relevant to future features
 
-- Quick Clip is the default path; current AI Smart Clip still needs Whisper on cache miss and Ollama when local provider is selected.
-- Mood Quotes supports user-owned backgrounds, 10 data-driven cinematic visual presets, local color/motion/atmosphere effects, semantic segmentation, uploaded audio mixing, and system-font rendering. Soft glow is not implemented. Grain, vignette, zoompan and 1080p filters add CPU work; choose Subtle or disable effects on slower machines. No stock-footage/music search, source-clip multi-clip timeline editor, cloud transcription, voiceover, or Mood Quotes YouTube adapter.
+- Quick Clip is the default path; Manual subtitles need no AI/provider. AI Smart Clip still needs local Whisper on transcript-cache miss and Ollama when local analysis is selected.
+- Mood Quotes supports user-owned backgrounds, 10 data-driven cinematic visual presets, local color/motion/atmosphere effects, semantic segmentation, uploaded audio mixing, and system-font rendering. Soft glow is not implemented. Grain, vignette, zoompan and 1080p filters add CPU work; choose Subtle or disable effects on slower machines. No stock-music search, source-clip multi-clip timeline editor, or Mood Quotes transcription/voiceover.
 - Quote prompts prohibit attribution, famous-quote/song-lyric copying, and generic repetition, but cannot prove internet-wide originality/plagiarism status. Human review remains necessary.
-- Cloud transcription and making Whisper/Ollama optional for other AI workflows remain roadmap work; Quick Clip itself has no such dependency.
-- Highlight subtitles are phrase/segment based; word-level timing is not available.
+- Optional cloud STT/translation needs configured backend key, internet, per-request consent, and may incur provider charges. OpenAI audio is capped at 25 MiB and provides no V2.8 timestamps; Gemini word timestamps cap composition at 30 minutes; local Whisper remains segment-timed. Accuracy needs human review. AI Smart Clip's full-source local Whisper requirement remains unchanged.
+- Word/karaoke caption modes require timed word cues; they are disabled when selected cues lack word timing. No timestamp precision is guaranteed.
 - Source-clip crop is fixed center/manual; no face tracking or source-clip timeline editor. Mood Quotes has its own single-composition visual timeline.
-- YouTube V1.1 is Post Now only; no scheduler, platform-wide video search, multi-channel chooser, or other social networks.
+- Automatic segment import depends on opt-in `yt-dlp`, FFmpeg/ffprobe, anonymous access, supported formats, and rights/platform permission; selected byte ranges are not guaranteed. Local Source Library/upload remains fallback. YouTube scheduling uses native YouTube `publishAt` and Private visibility; no local timer schedules or executes uploads. Social scheduling is unsupported; TikTok creator action and Instagram provider eligibility remain required. No platform-wide video search or multi-channel chooser.
 
 See [AI Pipeline](ai-pipeline.md), [Video Processing](video-processing.md), [API and Database](api-and-database.md), and [YouTube Publishing](youtube-shorts-publishing.md) for implementation details.

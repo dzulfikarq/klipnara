@@ -1,6 +1,6 @@
 # AI and Transcription Pipeline
 
-This guide covers AI Smart Clip and AI Mood Quotes. Quick Clip is separate and does not enter either AI path. Cloud transcription is planned, not implemented.
+This guide covers AI Smart Clip, Clip Editor transcription/translation, and AI Mood Quotes. Quick Clip creation/render stays outside candidate analysis; manual subtitles need no AI. The legacy synchronous subtitle endpoint still handles selected trims/scenes; V2.8 editor uses queued transcription of the full saved composition. V2.7 Asset Library/Pexels search/import stays outside AI pipeline.
 
 ## Transcription
 
@@ -13,7 +13,25 @@ On cache miss:
 3. Whisper segments and detected language are persisted to source row. Phrase-level timestamps are used; `-ml 1` word timestamps are not enabled.
 4. Temporary WAV/JSON files are removed after use or worker cleanup.
 
-Model location comes from `WHISPER_MODEL_PATH`; `small` is recommended from available Indonesian benchmark, `base` is a faster lower-accuracy option. AI Smart Clip uses Whisper on a transcript-cache miss. Quick Clip is the primary timestamp workflow and never initializes Whisper or Ollama.
+Model location comes from `WHISPER_MODEL_PATH`; `small` is recommended from available Indonesian benchmark, `base` is a faster lower-accuracy option. AI Smart Clip uses Whisper on a transcript-cache miss. Quick Clip does not require or initialize Whisper/Ollama; optional local subtitle STT is enabled only when whisper.cpp and a model are configured.
+
+## Legacy synchronous subtitle endpoint
+
+`POST /api/clips/{id}/subtitles/auto-generate` remains for compatibility. It extracts only the persisted single-scene trim or selected Multi-Scene `scene_id` from source audio. Local `whisper.cpp` uses a temporary mono 16 kHz WAV; optional OpenAI uses legacy `whisper-1` verbose segment timestamps and a 25 MiB cap. This route is synchronous. The V2.8 editor does not call it.
+
+The editor's subtitle timebase is explicit. During render, each source-time caption is intersected with ordered source ranges and mapped to derived output seconds. A caption crossing a scene cut is clipped at that boundary; reordering changes output timing without rewriting source time; repeated source ranges intentionally replicate captions. Cut Range ripple deletion excludes the removed source interval from output subtitles. Subtitle remapping is deterministic local logic, not an AI/semantic inference step. Manual text survives reorder/trim; users should inspect phrase timing after cuts.
+
+## V2.8 composition transcription and translation
+
+`POST /api/clips/{id}/subtitles/transcribe` snapshots ordered scene ranges, extracts/concatenates matching source audio, and queues a job. Local Whisper stays on-device and returns segment timestamps. Gemini `gemini-3.5-transcribe` requests verbatim word timestamps and speaker labels, with a 30-minute composition cap. OpenAI `gpt-transcribe` returns transcript text only; the UI does not fabricate timing, and users must add timed cues manually. All provider results are separate review drafts; selecting a track is an explicit action. Temporary local composition audio is removed after transcription.
+
+Cloud composition audio uploads only after a frontend confirmation and backend `consent=true`; OpenAI files are limited to 25 MiB. Gemini's uploaded file is deleted after the request when possible; provider expiry is the fallback. Retry requires fresh consent. No provider fallback occurs. Provider behavior, accuracy, service limits, and cost remain unverified here.
+
+`POST /api/clips/{id}/subtitles/translate` sends cue IDs/text only after separate explicit consent. The backend checks exact cue IDs/text, stores translation as a separate track, and fingerprints source IDs, text, and timing. Cue timing and original text remain local. Edited source cues mark translations outdated; stale translations cannot render as translated/bilingual output. Translation never changes original cues automatically.
+
+Manual cues, SRT/VTT import/export, cue editing, output-time mapping, and caption styling remain local. Output-time tracks bind to source hash plus composition fingerprint; scene/order/trim changes make them stale and block render until replaced/remapped. Import creates a review draft and does not activate captions. No database migration is used; tracks and styling stay in existing `clips.edit_json`.
+
+Manual mode works without audio, Whisper, network, or keys. OpenAI's V2.8 transcript text has no timestamps; local Whisper stays segment-timed; Gemini word timestamps are provider-generated, not a precision guarantee. Human review remains necessary.
 
 ## Highlight generation
 
@@ -50,7 +68,7 @@ flowchart TD
 
 - Ollama URL is restricted to loopback (`127.0.0.1`, `localhost`, `::1`); service/model check is up to three one-second attempts.
 - Local provider has no cloud fallback. Missing Ollama/model or timeout returns local error.
-- OpenAI/Gemini jobs require explicit `consent=true`, configured backend key and record `consent_at`. Retry requires fresh consent. Video/audio never sent to AI providers.
+- OpenAI/Gemini highlight jobs require explicit `consent=true`, configured backend key and record `consent_at`. Retry requires fresh consent. Highlight/Mood requests receive text only. V2.8 subtitle transcription is separate: cloud providers receive composition audio only after explicit per-request consent; translation receives subtitle text only; local STT stays local.
 - Gemini 429 stops the job; app does not upgrade billing, automatically retry or switch provider.
 - API keys are backend environment only; settings UI shows whether key exists, never the value.
 
@@ -121,9 +139,9 @@ Recorded output still contained likely ASR misspellings. No subjective audio rev
 
 ## Limitations
 
-- No diarization, word timestamps, translation, or speech-to-text cloud service is implemented.
-- Sentence/segment timestamps lead to phrase-level Highlight captions; long segments can wrap into multi-line subtitle blocks.
+- Legacy/source transcripts remain segment-timed. V2.8 local Whisper is segment-timed; Gemini requests word timing/speaker labels; OpenAI `gpt-transcribe` is text-only. No live V2.8 provider behavior was verified.
+- Sentence/phrase/word/karaoke caption modes need timed cues; long cues can wrap into multiple lines. Timestamp quality depends on provider and requires human correction.
 - Prompt and model results vary by input and model; text model does not guarantee coherent or culturally accurate candidate explanations.
-- Quick Clip timestamp workflow is implemented in [Features and Workflows](features-and-workflows.md); it bypasses this AI pipeline. Future Cloud Transcription remains planned in [Roadmap](roadmap.md).
+- Quick Clip timestamp workflow is implemented in [Features and Workflows](features-and-workflows.md); source selection/render bypasses candidate-analysis AI. Optional clip subtitle STT is documented in [Roadmap](roadmap.md).
 
 For user flow see [Features and Workflows](features-and-workflows.md); test commands and non-verified cases are in [Testing and Troubleshooting](testing-and-troubleshooting.md).

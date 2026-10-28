@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { AlertCircle, ArrowLeft, ArrowRight, Check, CheckCircle2, ChevronDown, Copy, Download, ExternalLink, Eye, Film, GripVertical, LoaderCircle, LockKeyhole, Maximize2, Minimize2, Pause, Play, Plus, Redo2, RotateCcw, Save, Scissors, Settings2, Sparkles, Trash2, Type, Undo2, Volume2, VolumeX, X, Youtube } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useConfirm } from "@/components/confirm-dialog";
 import { API, formatDuration, request, reviewStatusLabel } from "@/lib/api";
 import type { ReviewStatus } from "@/lib/api";
 import { clipEditorStatus } from "@/lib/clip-editor-state.mjs";
@@ -37,6 +38,7 @@ function groupCaptionWords(words: Word[]) {
 }
 
 export default function ClipEditorPage() {
+  const confirm = useConfirm();
   const params = useParams<{ id: string }>();
   const [data, setData] = useState<Data | null>(null);
   const [batchId, setBatchId] = useState("");
@@ -614,7 +616,7 @@ export default function ClipEditorPage() {
     window.location.assign(`/batches/${batchId}`);
   };
   const generateSubtitles = async () => {
-    if (subtitleProvider !== "local" && !window.confirm(`Audio komposisi output (${formatDuration(timelineDuration)}) dapat dikirim ke ${subtitleProvider === "gemini" ? "Google Gemini" : "OpenAI"} jika belum ada draft cocok. API mungkin berbayar; biaya tidak dapat dihitung di sini. Lanjutkan?`)) return;
+    if (subtitleProvider !== "local" && !(await confirm(`Audio komposisi output (${formatDuration(timelineDuration)}) dapat dikirim ke ${subtitleProvider === "gemini" ? "Google Gemini" : "OpenAI"} jika belum ada draft cocok. API mungkin berbayar; biaya tidak dapat dihitung di sini. Lanjutkan?`, { title: "Kirim audio ke provider cloud?", confirmLabel: "Setuju & lanjutkan" }))) return;
     setSubtitleBusy(true); setError("");
     try {
       if (dirty && !(await save())) return;
@@ -632,7 +634,7 @@ export default function ClipEditorPage() {
     finally { setSubtitleBusy(false); }
   };
   const translateSubtitles = async () => {
-    if (!window.confirm(`Teks subtitle (${visibleSegments.length} cue) dapat dikirim ke ${translationProvider === "gemini" ? "Google Gemini" : "OpenAI"} jika belum ada terjemahan cocok. API mungkin berbayar. Lanjutkan?`)) return;
+    if (!(await confirm(`Teks subtitle (${visibleSegments.length} cue) dapat dikirim ke ${translationProvider === "gemini" ? "Google Gemini" : "OpenAI"} jika belum ada terjemahan cocok. API mungkin berbayar. Lanjutkan?`, { title: "Kirim teks ke provider cloud?", confirmLabel: "Setuju & lanjutkan" }))) return;
     setSubtitleBusy(true); setError("");
     try {
       if (dirty && !(await save())) return;
@@ -657,7 +659,7 @@ export default function ClipEditorPage() {
   const retryJob = async () => {
     if (!job) return;
     const cloud = job.provider ? job.provider !== "local" : job.kind === "subtitle_translate";
-    if (cloud && !window.confirm("Retry mengirim ulang audio/teks ke provider dan dapat menimbulkan biaya baru. Setuju?")) return;
+    if (cloud && !(await confirm("Retry mengirim ulang audio/teks ke provider dan dapat menimbulkan biaya baru. Setuju?", { title: "Ulangi permintaan cloud?", confirmLabel: "Setuju & ulangi" }))) return;
     try {
       const result = await request<{ id: string; status: string }>(`/jobs/${job.id}/retry`, { method: "POST", body: JSON.stringify({ consent: cloud }) });
       setJob({ id: result.id, kind: job.kind, provider: job.provider, status: result.status, phase: result.status, progress: null, message: "Retry masuk antrean" });
@@ -766,7 +768,7 @@ export default function ClipEditorPage() {
         method: "POST", body: JSON.stringify({ format, text, clamp }),
       });
       let result = await send(false);
-      if (result.needs_clamp && window.confirm(`Some cues exceed current output duration (${formatDuration(timelineDuration)}). Clamp/drop out-of-range cues?`)) result = await send(true);
+      if (result.needs_clamp && await confirm(`Some cues exceed current output duration (${formatDuration(timelineDuration)}). Clamp/drop out-of-range cues?`, { title: "Sesuaikan cue di luar durasi?", confirmLabel: "Sesuaikan cue" })) result = await send(true);
       if (!result.track) { setSubtitleNotice(result.warnings.join(" ") || "Import needs duration correction."); return; }
       applyEdit((current) => ({ ...current, subtitle_tracks: [...current.subtitle_tracks.filter((track) => track.id !== result.track!.id), result.track!] }));
       setSubtitleNotice(result.warnings.length ? result.warnings.join(" ") : "Subtitle imported. Review track, then choose Gunakan track.");

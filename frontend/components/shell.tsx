@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { CalendarDays, Clapperboard, Film, FolderOpen, Gauge, Home, Scissors, Settings2, Youtube } from "lucide-react";
+import { CalendarDays, Film, FolderOpen, Gauge, Home, MoreHorizontal, Scissors, Settings2, Youtube } from "lucide-react";
 import { ReactNode, useEffect, useState } from "react";
 import { API } from "@/lib/api";
 
@@ -19,6 +19,7 @@ const nav = [
 export function Shell({ children }: { children: ReactNode }) {
   const path = usePathname();
   const [online, setOnline] = useState(false);
+  const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
   useEffect(() => {
     fetch(`${API}/api/health`).then((res) => setOnline(res.ok)).catch(() => setOnline(false));
   }, [path]);
@@ -28,14 +29,20 @@ export function Shell({ children }: { children: ReactNode }) {
     <div className="app-shell">
       <aside className="sidebar">
         <Link href="/" className="brand">
-          <span className="brand-mark"><Clapperboard size={21} strokeWidth={2.1} /></span>
-          <span>Klipnara<small>AI VIDEO STUDIO</small></span>
+          <span className="brand-wordmark">Klipnara<small>AI VIDEO STUDIO</small></span>
         </Link>
         <div className="nav-caption">WORKSPACE</div>
         <nav className="side-nav">
           {nav.map(({ href, label, icon: Icon }) => {
             const active = href === "/" ? path === "/" : path === href || path.startsWith(`${href}/`);
-            return <Link key={href} href={href} className={`nav-link ${active ? "active" : ""}`}><Icon size={18} strokeWidth={1.8} /><span>{label}</span>{href === "/create" && <span className="nav-plus">+</span>}</Link>;
+            return <Link key={href} href={href} aria-current={active ? "page" : undefined} onClick={() => setMobileMoreOpen(false)} className={`nav-link ${active ? "active" : ""}`}><Icon size={18} strokeWidth={1.8} /><span>{label}</span>{href === "/create" && <span className="nav-plus">+</span>}</Link>;
+          })}
+          <button type="button" className={`mobile-more-button ${mobileMoreOpen || ["/library", "/accounts", "/settings"].some((href) => path === href || path.startsWith(`${href}/`)) ? "active" : ""}`} aria-expanded={mobileMoreOpen} aria-controls="mobile-more-menu" onClick={() => setMobileMoreOpen((open) => !open)}><MoreHorizontal size={18} strokeWidth={1.8}/><span>Lainnya</span></button>
+        </nav>
+        <nav id="mobile-more-menu" className="mobile-more-menu" aria-label="Navigasi lainnya" hidden={!mobileMoreOpen}>
+          {nav.filter(({ href }) => ["/library", "/accounts", "/settings"].includes(href)).map(({ href, label, icon: Icon }) => {
+            const active = path === href || path.startsWith(`${href}/`);
+            return <Link key={href} href={href} aria-current={active ? "page" : undefined} onClick={() => setMobileMoreOpen(false)} className={active ? "active" : ""}><Icon size={17}/><span>{label}</span></Link>;
           })}
         </nav>
         <div className="sidebar-bottom">
@@ -45,7 +52,7 @@ export function Shell({ children }: { children: ReactNode }) {
         </div>
       </aside>
       <div className="main-column">
-        <header className="topbar"><div className="mobile-brand"><Clapperboard size={18} /> Klipnara</div><div className="breadcrumb">Workspace <span>/</span> <strong>{current}</strong></div><div className="topbar-right"><span className="privacy-pill"><i />LOCAL-FIRST</span><Link href="/settings" aria-label="Pengaturan" className="avatar">K</Link></div></header>
+        <header className="topbar"><div className="mobile-brand">Klipnara</div><div className="breadcrumb">Workspace <span>/</span> <strong>{current}</strong></div><div className="topbar-right"><span className="privacy-pill"><i />LOCAL-FIRST</span><Link href="/settings" aria-label="Pengaturan" className="avatar">K</Link></div></header>
         <main className="main-content">{children}</main>
       </div>
     </div>

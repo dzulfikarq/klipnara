@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { ArrowDown, ArrowLeft, ArrowUp, CheckCircle2, Clock3, Download, ExternalLink, Film, LoaderCircle, Pause, Play, RotateCcw, Trash2, XCircle, Youtube } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import { useConfirm } from "@/components/confirm-dialog";
 import { API, formatDuration, request, reviewStatusLabel } from "@/lib/api";
 
 type BatchItem = {
@@ -22,6 +23,7 @@ const labels: Record<string, string> = { draft: "Draft", ready: "Siap", queued: 
 export default function BatchDetailPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
+  const confirm = useConfirm();
   const [batch, setBatch] = useState<Batch | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -89,11 +91,15 @@ export default function BatchDetailPage() {
     void action(`/batches/${batch.id}`, "PATCH", { shared_settings: settings, apply_to_pending: true });
   };
   const removeBatch = async () => {
-    if (!batch || !window.confirm("Remove batch queue record? Clip/Mood drafts and rendered MP4 outputs remain available as individual projects.")) return;
+    if (!batch || !(await confirm("Remove batch queue record? Clip/Mood drafts and rendered MP4 outputs remain available as individual projects.", { title: "Hapus record batch?", confirmLabel: "Hapus record", destructive: true }))) return;
     setBusy(true); setError("");
     try { await request(`/batches/${batch.id}`, { method: "DELETE" }); router.push("/batches"); }
     catch (reason) { setError((reason as Error).message); }
     finally { setBusy(false); }
+  };
+  const cancelBatch = async () => {
+    if (!batch || !(await confirm("Batalkan batch dan tandai item menunggu sebagai dibatalkan? Render aktif berhenti lewat jalur cancel aman; output selesai tetap disimpan.", { title: "Batalkan batch?", confirmLabel: "Batalkan batch", destructive: true }))) return;
+    await action(`/batches/${batch.id}/cancel`);
   };
 
   if (!batch) return <><div className="page-intro"><Link href="/batches" className="back-link"><ArrowLeft size={14}/> Batch Creator</Link><h1>Batch</h1></div>{error && <div className="notice notice-error">{error}</div>}</>;
@@ -108,7 +114,7 @@ export default function BatchDetailPage() {
       {active && batch.status !== "pausing" && <button className="button button-outline" disabled={busy} onClick={() => void action(`/batches/${batch.id}/pause`)}><Pause size={15}/> Pause setelah item aktif</button>}
       {batch.status === "paused" && <button className="button button-primary" disabled={busy} onClick={() => void action(`/batches/${batch.id}/resume`)}><Play size={15}/> Resume</button>}
       {batch.failed_count > 0 && !active && <button className="button button-outline" disabled={busy} onClick={() => void action(`/batches/${batch.id}/retry-failed`)}><RotateCcw size={15}/> Retry failed items</button>}
-      {! ["completed", "completed_with_errors", "failed", "cancelled"].includes(batch.status) && <button className="button button-danger" disabled={busy} onClick={() => { if (window.confirm("Batalkan batch dan tandai item menunggu sebagai dibatalkan? Render aktif berhenti lewat jalur cancel aman; output selesai tetap disimpan.")) void action(`/batches/${batch.id}/cancel`); }}><XCircle size={15}/> Cancel Batch</button>}
+      {! ["completed", "completed_with_errors", "failed", "cancelled"].includes(batch.status) && <button className="button button-danger" disabled={busy} onClick={() => void cancelBatch()}><XCircle size={15}/> Cancel Batch</button>}
       <button className="button button-outline" disabled={busy} onClick={() => void refresh()}><RotateCcw size={14}/> Refresh</button>
       {!active && !jobsActive && <button className="button button-quiet" disabled={busy} onClick={() => void removeBatch()}><Trash2 size={14}/> Hapus batch record</button>}
      </div>{batch.error && <p className="batch-inline-error">{batch.error}</p>}{error && <div className="notice notice-error">{error}</div>}<p className="batch-muted"><Clock3 size={13}/> Satu render aktif. Pause menunggu item aktif selesai; progress persen hanya tampil untuk job yang memberi angka nyata.</p>{batch.type === "video_clips" && ["draft", "ready", "paused"].includes(batch.status) && <div className="batch-shared-settings"><label className="field"><span>Preset bersama</span><select value={preset} onChange={(event) => setPreset(event.target.value)}><option value="balanced">Balanced · 720p</option><option value="lightweight">Lightweight · 720p smaller</option><option value="high">High Quality · 1080p</option></select></label><button className="button button-outline" disabled={busy} onClick={applySharedSettings}>Terapkan ke item pending non-custom</button><small>Custom Override tetap dipertahankan. Item completed tidak dirender ulang otomatis.</small></div>}</section>

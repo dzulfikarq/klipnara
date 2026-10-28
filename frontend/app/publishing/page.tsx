@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, ArrowRight, BarChart3, CalendarDays, CheckCircle2, Clock3, Copy, Download, ExternalLink, FileImage, Film, Instagram, LoaderCircle, RefreshCw, Save, Search, Send, ShieldCheck, Trash2, TrendingUp, Upload, X, Youtube } from "lucide-react";
+import { useConfirm } from "@/components/confirm-dialog";
 import { API, formatBytes, formatDuration, request, reviewStatusLabel } from "@/lib/api";
 
 type ContentType = "clip" | "mood_render";
@@ -169,6 +170,7 @@ function chooseAvailable(current: string, accounts: Platform["accounts"]) {
 }
 
 export default function PublishingPage() {
+  const confirm = useConfirm();
   const [content, setContent] = useState<Content[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [publications, setPublications] = useState<Publication[]>([]);
@@ -665,13 +667,13 @@ export default function PublishingPage() {
   };
 
   const retryPlatformJob = async (job: PlatformJob) => {
-    if (!window.confirm(`Retry ${job.platform} transfer? Confirm current media rights and review this platform's status first.`)) return;
+    if (!(await confirm(`Retry ${job.platform} transfer? Confirm current media rights and review this platform's status first.`, { title: "Ulangi transfer?", confirmLabel: "Ulangi transfer" }))) return;
     const abandonIncompleteInstagram = job.platform === "instagram" && job.status === "needs_reconciliation"
       && job.phase === "processing_timeout" && job.provider_status === "IN_PROGRESS";
     const duplicateRisk = Boolean(job.upload_started && !job.remote_id) || abandonIncompleteInstagram;
-    if (duplicateRisk && !window.confirm(abandonIncompleteInstagram
+    if (duplicateRisk && !(await confirm(abandonIncompleteInstagram
       ? "Instagram still reports this container in progress. This abandons that incomplete container and creates a new one; check Instagram first. Continue?"
-      : "Provider may have accepted prior request without returning an operation ID. Retry can create duplicate content. Continue?")) return;
+      : "Provider may have accepted prior request without returning an operation ID. Retry can create duplicate content. Continue?", { title: "Risiko duplikasi konten", confirmLabel: "Tetap ulangi" }))) return;
     setBusy(job.id); setError(""); setNotice("");
     try {
       await request(`/platform-publications/${job.id}/retry`, {
@@ -685,7 +687,7 @@ export default function PublishingPage() {
   };
 
   const cancelPlatformJob = async (job: PlatformJob) => {
-    if (!window.confirm(`Cancel ${job.platform} transfer? If provider already received bytes, status must be reconciled.`)) return;
+    if (!(await confirm(`Cancel ${job.platform} transfer? If provider already received bytes, status must be reconciled.`, { title: "Batalkan transfer?", confirmLabel: "Batalkan transfer", destructive: true }))) return;
     setBusy(job.id); setError(""); setNotice("");
     try {
       await request(`/platform-publications/${job.id}/cancel`, { method: "POST" });

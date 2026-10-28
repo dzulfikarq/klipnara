@@ -261,14 +261,14 @@ export default function AssetLibraryPage() {
     </div>
     <div className="asset-library-toolbar">
       <div className="asset-results-count"><strong>{tab === "stock" ? stock.length : total}</strong> {tab === "stock" ? "hasil halaman" : "asset"}</div>
-      <label className="search-box"><Search size={15}/><input placeholder={tab === "stock" ? "Cari di Pexels…" : `Cari ${assetTitle.toLowerCase()}…`} value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); setStockPage(1); }}/></label>
+      <label className="search-box"><Search size={15}/><input aria-label={tab === "stock" ? "Cari footage Pexels" : `Cari ${assetTitle.toLowerCase()}`} placeholder={tab === "stock" ? "Cari di Pexels…" : `Cari ${assetTitle.toLowerCase()}…`} value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); setStockPage(1); }}/></label>
       {tab !== "stock" && tab !== "favorites" && <label className="asset-upload-control"><Upload size={14}/>{busy ? "Menyimpan…" : `Upload ${tab === "audio" ? "musik" : tab === "image" ? "gambar" : "video"}`}<input type="file" accept={tab === "audio" ? ".mp3,.wav,.m4a,audio/*" : tab === "image" ? ".jpg,.jpeg,.png,.webp,image/*" : ".mp4,.mov,video/mp4,video/quicktime"} disabled={busy} onChange={(event) => void upload(event, tab === "audio" ? "audio" : tab === "image" ? "image" : "video")}/></label>}
       {tab === "audio" && <label className="asset-mood-filter"><span>Mood</span><select value={musicMoodFilter} onChange={(event) => { setMusicMoodFilter(event.target.value); setPage(1); }}><option value="">Semua mood</option>{moods.map((mood) => <option key={mood}>{mood}</option>)}</select></label>}
     </div>
 
     {tab === "stock" && <>
       <div className="stock-filters">
-        <div className="stock-quick-search">{quickSearches.map((word) => <button type="button" key={word} className={query.toLowerCase() === word.toLowerCase() ? "active" : ""} onClick={() => { setQuery(word); setStockPage(1); }}>{word}</button>)}</div>
+        <div className="stock-quick-search" role="group" aria-label="Pencarian cepat">{quickSearches.map((word) => <button type="button" key={word} className={query.toLowerCase() === word.toLowerCase() ? "active" : ""} onClick={() => { setQuery(word); setStockPage(1); }}>{word}</button>)}</div>
         <label><span>Orientasi</span><select value={orientation} onChange={(event) => { setOrientation(event.target.value); setStockPage(1); }}><option value="">Semua orientasi</option><option value="portrait">Portrait</option><option value="landscape">Landscape</option><option value="square">Square</option></select></label>
         <label><span>Resolusi minimum</span><select value={size} onChange={(event) => { setSize(event.target.value); setStockPage(1); }}><option value="">Semua</option><option value="small">HD</option><option value="medium">Full HD</option><option value="large">4K</option></select></label>
         <label><span>Durasi minimum</span><select value={minDuration} onChange={(event) => { setMinDuration(event.target.value); setStockPage(1); }}><option value="">Semua</option><option value="5">5 dtk</option><option value="15">15 dtk</option><option value="30">30 dtk</option><option value="60">60 dtk</option></select></label>

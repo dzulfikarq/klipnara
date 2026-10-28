@@ -17,34 +17,44 @@ This document is required reading before creating or changing frontend UI. Keep 
 
 ### Color
 
-Use existing tokens from `frontend/app/globals.css`:
+Use semantic theme and typography tokens from `frontend/app/theme.css`, plus spacing tokens from `frontend/app/globals.css`:
 
 | Token | Use |
 |---|---|
 | `--ink` | Main text |
 | `--muted` | Secondary text; maintain readable contrast |
 | `--line` | Subtle separators and control borders |
-| `--paper` / `--canvas` | Surface / app background |
+| `--paper` / `--surface` / `--canvas` / `--bg` | Surface / app background |
+| `--surface` / `--surface-alt` / `--sidebar` | Panels, secondary surfaces, and navigation |
+| `--border` / `--text` | Semantic aliases for `--line` / `--ink` |
 | `--green` / `--green-dark` / `--green-soft` | Primary action, emphasis, selected state |
-| `--amber` / `--red` | Warning / destructive or error state |
+| `--primary` / `--primary-soft` / `--on-primary` | Semantic aliases/action contrast |
+| `--amber` / `--warning`, `--red` / `--danger` | Warning / destructive or error state |
 
 Use status color with text or an icon; never rely on color alone. Keep cards mostly neutral. Gradients belong only to existing feature illustrations or media previews, not routine UI surfaces.
 
+### Theme behavior
+
+- Dark is the default (`#0C1214` canvas); light is optional (`#F5F8F7`). Use `--surface`, `--surface-alt`, `--sidebar`, `--border`/`--line`, `--text`/`--ink`, `--muted`, `--primary`/`--green`, `--primary-soft`/`--green-soft`, and `--on-primary` consistently.
+- `ThemeProvider` persists `dark` or `light` in local storage only. The root-layout initializer applies preference before first paint; never send theme preference to backend.
+- Keep quick toggle in topbar and full toggle in Settings. Native controls follow selected `color-scheme`; media and user-selected subtitle/title colors remain unchanged.
+
 ### Typography
 
-Use `--font-body` and `--font-heading`. Both resolve to a system UI stack so local-first installs do not depend on network fonts or fonts incidentally installed on one machine. Do not reintroduce remote font imports or unbundled DM Sans/Manrope references.
+Use locally hosted Inter Variable from `frontend/app/fonts/InterVariable.woff2`, loaded with `next/font/local` in the root layout. Use `--font-body` and `--font-heading`; no runtime font-network request or remote font import. Do not reintroduce unbundled DM Sans/Manrope references.
 
 | Role | Target |
 |---|---:|
-| Page title | 26–30px |
-| Section title | 20–24px |
-| Card/subsection title | 16–18px |
-| Body and form control | 14px |
-| Button and field label | 13–14px |
-| Secondary text | 13–14px |
-| Metadata/caption | 12px; 11px only when constrained |
+| Page title | 26px / 600 (24px on narrow mobile) |
+| Section title | 18px / 600 |
+| Card title | 15px / 600 |
+| Body and input | 14px / 400 |
+| Button and sidebar | 14px / 500 (mobile navigation: 12px) |
+| Label | 13px / 400–500 |
+| Metadata and caption | 12–13px / 400–500 |
+| Primary statistic | 28px / 600 (24px on narrow mobile) |
 
-Do not use text below 11px for ordinary UI. The only small-type exceptions are timeline rulers/compact timeline labels and subtitle text rendered inside a video preview, where sizing represents output content. Never use those exceptions for interactive controls, account instructions, diagnostics, or status explanations.
+Use `--type-page-title`, `--type-section-title`, `--type-card-title`, `--type-body`, `--type-control`, `--type-button`, `--type-sidebar`, `--type-label`, `--type-meta`, and `--type-stat`, with `--weight-*` and `--line-height-*` tokens from `frontend/app/theme.css`. Do not add hardcoded UI font sizes or weights when a role token applies. Headings use compact 1.25–1.35 line-height, body uses 1.5, and metadata uses 1.45. Keep letter-spacing subtle; do not tighten body copy. Ordinary UI text must be at least 12px. Timeline rulers/compact timeline labels may be smaller when density requires it. Subtitle, title-overlay, and rendered-video typography stay editor-controlled and must not inherit UI typography changes. Never use small-type exceptions for interactive controls, account instructions, diagnostics, or status explanations.
 
 ### Spacing and shape
 
@@ -52,18 +62,18 @@ Use spacing tokens `--space-1` (4), `--space-2` (8), `--space-3` (12), `--space-
 
 ## Shared UI patterns
 
-Use existing shared classes before adding page-specific variants: `.button`, `.icon-button`, `.field`, `.panel`, `.notice`, `.page-intro`, `.eyebrow`, `.empty-*`, and shared status classes. Add a React wrapper only when it removes repeated behavior, not merely to wrap one markup instance. Keep classnames compatible with existing routes.
+Use existing shared classes before adding page-specific variants: `.button`, `.icon-button`, `.field`, `.panel`, `.notice`, `.page-intro`, `.eyebrow`, `.empty-*`, shared status classes, and `ThemeToggle`. Add a React wrapper only when it removes repeated behavior, not merely to wrap one markup instance. Keep classnames compatible with existing routes.
 
 ### Buttons and icons
 
 - Variants: primary, outline/secondary, quiet/ghost, and destructive. Use one clear primary action per group. Destructive actions use a solid red button.
 - Default button height: 42px; common outline/compact actions: at least 40px. Mobile targets should reach 44px where workflow density permits. Dense timeline actions may stay compact but need visible labels/tooltips and remain keyboard-operable.
-- Button text is 13–14px. Align Lucide icons with text; use 16px for compact controls and 18–20px for primary navigation or section markers.
+- Button text is 14px / 500. Align Lucide icons with text; use 16px for compact controls and 18–20px for primary navigation or section markers.
 - Icon-only controls need an accessible name, visible focus, and a comfortable hit area. Small editor/timeline controls are documented exceptions, not a general button style.
 
 ### Forms
 
-- Labels remain visible and use 13–14px. Body/input/select text uses 14px. Helper text uses at least 12px and explains a constraint or next step.
+- Labels remain visible and use 13px. Body/input/select text uses 14px. Helper text uses at least 12px and explains a constraint or next step.
 - Standard fields target 44px height, consistent borders, radius, and focus treatment. Group related values; do not use placeholder text as the only label.
 - Preserve native input semantics and validation. Use `aria-invalid` and associate actionable error text where appropriate. Do not change trust-boundary validation as a styling shortcut.
 
@@ -87,10 +97,10 @@ Use existing shared classes before adding page-specific variants: `.button`, `.i
 
 ## App shell and responsive layout
 
-- Main content shares a maximum width near 1240px and aligns with the topbar. Desktop sidebar is about 232px; keep backend status subordinate to navigation.
-- Desktop uses a fixed sidebar and compact sticky topbar. Mobile uses a five-item bottom navigation: Ringkasan, Buat Video, Clip Library, YouTube Studio, and **Lainnya**. Put Asset Library, Akun, and Pengaturan in the accessible More menu; do not remove route access.
+- Main content shares a maximum width near 1380px and aligns with the topbar. Desktop sidebar is about 244px; keep backend status subordinate to navigation.
+- Desktop uses a fixed sidebar grouped into Workspace, Distribusi, and Utility, plus a compact sticky topbar. Mobile uses a five-item bottom navigation: Ringkasan, Buat Video, Clip Library, Publishing Studio, and **Lainnya**. Put Asset Library, Batch Creator, Akun Terhubung, and Pengaturan in the accessible More menu; do not remove route access.
 - Account for `env(safe-area-inset-bottom)`. Reserve content space for the bottom bar. Keep the More menu reachable by keyboard and expose `aria-expanded`/`aria-controls`.
-- Review at 1440px+, 1366px, 900/768px, 390px, and 320px. Use responsive grids, wrapping toolbars, and `minmax(0,1fr)`. Prevent page-level horizontal overflow; horizontal scrolling is reserved for tables/timelines that need it.
+- Review at 1440px+, 1366px, 1024/768px, 390px, and 320px. Use responsive grids, wrapping toolbars, and `minmax(0,1fr)`. Prevent page-level horizontal overflow; horizontal scrolling is reserved for tables/timelines that need it.
 - Dialogs must fit within viewport height and scroll internally. Media previews preserve their aspect ratio. Do not clip ancestors around sticky editor preview.
 
 ## Workflow patterns
@@ -135,7 +145,7 @@ Analytics scope stays explicit: **Channel** is a full channel report; **Klipnara
 
 Before closing a UI change, review at desktop wide, 1366px, 768px, 390px, and 320px:
 
-- Typography hierarchy, contrast, and no ordinary text below 11px.
+- Dark default and light option, no preference flash, typography hierarchy, contrast, and no ordinary text below 12px.
 - Alignment, spacing, long text/path overflow, and page width.
 - Primary/secondary/destructive button hierarchy and touch targets.
 - Keyboard tab order, visible focus, accessible names, dialog Escape/focus restoration.
@@ -143,4 +153,4 @@ Before closing a UI change, review at desktop wide, 1366px, 768px, 390px, and 32
 - Safe-area bottom navigation, More-menu access, dialog viewport fit, and video aspect ratio.
 - Editor sticky preview and horizontally scrollable timeline; no changes to editor, publishing, or rendering behavior.
 
-The app is light-theme only. Do not claim dark-theme compatibility. Browser QA is a manual step; static inspection does not establish visual correctness. Existing Node built-in tests are `frontend/lib/clip-editor-state.test.mjs` and `frontend/lib/word-pop.test.mjs`; run them only when explicitly authorized.
+Browser QA is a manual step; static inspection does not establish visual correctness or contrast compliance. Existing Node built-in tests are `frontend/lib/clip-editor-state.test.mjs` and `frontend/lib/word-pop.test.mjs`; run them only when explicitly authorized.

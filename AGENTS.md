@@ -26,4 +26,9 @@ These project-wide rules apply to all coding-agent sessions. If a root `AGENTS.m
 - Update applicable product documentation (`README.md`, relevant `docs/*`) when implementing features.
 - When finishing a task, report what changed, what was not run, any risks, and the proposed commit grouping. Do not claim tests or runtime checks passed when they were not run.
 
+## Frontend UI/UX
+
+- Before creating or changing frontend UI, read and follow `docs/design.md`. Treat its brand, typography, spacing, responsive, accessibility, and workflow rules as required standards.
+- Preserve existing route behavior, API contracts, local data, and media-processing logic while refining presentation.
+
 **Detailed required standard:** `docs/GIT_WORKFLOW.md`.

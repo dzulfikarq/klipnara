@@ -941,7 +941,7 @@ def transcription_model_id():
 def _run(command, cancel):
     error_log = WORK_DIR / f"ffmpeg-{uuid.uuid4().hex}.log"
     try:
-        with error_log.open("wb") as stderr:
+        with error_log.open("w+b") as stderr:
             process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=stderr)
             try:
                 while process.poll() is None:
@@ -1042,6 +1042,11 @@ def render(source, clip, edit, segments, job_id, cancel, progress, has_audio=Tru
     if multi_scene:
         graph = []
         video_labels, audio_labels, video_frame_counts = [], [], []
+        video_normalizer = (
+            f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{height}:(in_w-out_w)*{crop_x / 100:.4f}:(in_h-out_h)*{crop_y / 100:.4f},"
+            f"setsar=1,fps={fps},format=yuv420p,settb=AVTB"
+        )
         for index, scene in enumerate(scenes):
             scene_duration = scene["duration"]
             frame_count = max(1, math.floor(scene_duration * fps + 1e-6))
@@ -1081,34 +1086,41 @@ def render(source, clip, edit, segments, job_id, cancel, progress, has_audio=Tru
                 if transition_frames and timing_mode == "insert_slot":
                     slot_frames = transition_frames
                     slot_duration = slot_frames / fps
+                    from_main_source, from_hold_source = f"vmain_src_{index}", f"vhold_src_{index}"
+                    to_hold_source, to_main_source = f"vto_hold_src_{index}", f"vto_main_src_{index}"
+                    graph.append(f"[{video_output}]split=2[{from_main_source}][{from_hold_source}]")
+                    graph.append(f"[{next_video}]split=2[{to_hold_source}][{to_main_source}]")
+                    from_main, to_main = f"vmain_{index}", f"vto_main_{index}"
+                    graph.append(f"[{from_main_source}]{video_normalizer}[{from_main}]")
+                    graph.append(f"[{to_main_source}]{video_normalizer}[{to_main}]")
                     from_hold, to_hold = f"hold_from_{index}", f"hold_to_{index}"
                     graph.append(
-                        f"[{video_output}]trim=start_frame={video_frames - 1}:end_frame={video_frames},setpts=PTS-STARTPTS,"
+                        f"[{from_hold_source}]trim=start_frame={video_frames - 1}:end_frame={video_frames},setpts=PTS-STARTPTS,"
                         f"tpad=stop_mode=clone:stop_duration={slot_duration:.9f},fps={fps},trim=end_frame={slot_frames},"
-                        f"format=yuv420p,settb=AVTB[{from_hold}]"
+                        f"{video_normalizer}[{from_hold}]"
                     )
                     graph.append(
-                        f"[{next_video}]trim=start_frame=0:end_frame=1,setpts=PTS-STARTPTS,"
+                        f"[{to_hold_source}]trim=start_frame=0:end_frame=1,setpts=PTS-STARTPTS,"
                         f"tpad=stop_mode=clone:stop_duration={slot_duration:.9f},fps={fps},trim=end_frame={slot_frames},"
-                        f"format=yuv420p,settb=AVTB[{to_hold}]"
+                        f"{video_normalizer}[{to_hold}]"
                     )
                     slot = f"vslot_{index}"
                     if transition.get("type") == "dip_to_black":
                         from_frames = (slot_frames + 1) // 2
                         to_frames = slot_frames - from_frames
                         from_part, to_part = f"vdip_from_{index}", f"vdip_to_{index}"
-                        graph.append(f"[{from_hold}]fade=t=out:st=0:d={from_frames / fps:.9f},trim=end_frame={from_frames}[{from_part}]")
-                        graph.append(f"[{to_hold}]fade=t=in:st=0:d={to_frames / fps:.9f},trim=end_frame={to_frames}[{to_part}]")
-                        graph.append(f"[{from_part}][{to_part}]concat=n=2:v=1:a=0,trim=end_frame={slot_frames},setpts=PTS-STARTPTS,settb=AVTB[{slot}]")
+                        graph.append(f"[{from_hold}]fade=t=out:st=0:d={from_frames / fps:.9f},trim=end_frame={from_frames},{video_normalizer}[{from_part}]")
+                        graph.append(f"[{to_hold}]fade=t=in:st=0:d={to_frames / fps:.9f},trim=end_frame={to_frames},{video_normalizer}[{to_part}]")
+                        graph.append(f"[{from_part}][{to_part}]concat=n=2:v=1:a=0,trim=end_frame={slot_frames},setpts=PTS-STARTPTS,{video_normalizer}[{slot}]")
                     else:
                         graph.append(
                             f"[{from_hold}][{to_hold}]xfade=transition={effect}:duration={slot_duration:.9f}:offset=0,"
-                            f"trim=end_frame={slot_frames},setpts=PTS-STARTPTS,settb=AVTB[{slot}]"
+                            f"trim=end_frame={slot_frames},setpts=PTS-STARTPTS,{video_normalizer}[{slot}]"
                         )
                     composed_frames = video_frames + slot_frames + next_frames
                     graph.append(
-                        f"[{video_output}][{slot}][{next_video}]concat=n=3:v=1:a=0,"
-                        f"trim=end_frame={composed_frames},setpts=PTS-STARTPTS,settb=AVTB[{next_output}]"
+                        f"[{from_main}][{slot}][{to_main}]concat=n=3:v=1:a=0,"
+                        f"trim=end_frame={composed_frames},setpts=PTS-STARTPTS,{video_normalizer}[{next_output}]"
                     )
                     video_frames = composed_frames
                 elif transition_frames:
@@ -1117,12 +1129,12 @@ def render(source, clip, edit, segments, job_id, cancel, progress, has_audio=Tru
                     composed_frames = video_frames + next_frames - transition_frames
                     graph.append(
                         f"[{video_output}][{next_video}]xfade=transition={effect}:duration={transition_frames / fps:.9f}:offset={offset:.9f},"
-                        f"trim=end_frame={composed_frames},setpts=PTS-STARTPTS,settb=AVTB[{next_output}]"
+                        f"trim=end_frame={composed_frames},setpts=PTS-STARTPTS,{video_normalizer}[{next_output}]"
                     )
                     video_frames = composed_frames
                 else:
                     composed_frames = video_frames + next_frames
-                    graph.append(f"[{video_output}][{next_video}]concat=n=2:v=1:a=0,trim=end_frame={composed_frames},setpts=PTS-STARTPTS,settb=AVTB[{next_output}]")
+                    graph.append(f"[{video_output}][{next_video}]concat=n=2:v=1:a=0,trim=end_frame={composed_frames},setpts=PTS-STARTPTS,{video_normalizer}[{next_output}]")
                     video_frames = composed_frames
                 video_output = next_output
             audio_output = _compose_scene_audio(graph, scenes, audio_labels, "render")
@@ -1169,7 +1181,7 @@ def render(source, clip, edit, segments, job_id, cancel, progress, has_audio=Tru
     process = None
     succeeded = False
     try:
-        with error_log.open("wb") as stderr:
+        with error_log.open("w+b") as stderr:
             process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=stderr, text=True, bufsize=1)
             for line in process.stdout:
                 if cancel.is_set():

@@ -492,6 +492,11 @@ def run():
             inserted_graph = inserted_command[inserted_command.index("-filter_complex") + 1]
             assert inserted_command[inserted_command.index("-t") + 1] == "5.500000"
             assert "scale=1080:1920" in inserted_graph and "fps=60" in inserted_graph and "setpts=PTS-STARTPTS" in inserted_graph
+            assert "[v0]split=2[vmain_src_0][vhold_src_0]" in inserted_graph
+            assert "[v1]split=2[vto_hold_src_0][vto_main_src_0]" in inserted_graph
+            assert "[vmain_src_0]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920:" in inserted_graph
+            assert "[vto_main_src_0]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920:" in inserted_graph
+            assert "[vmain_0][vslot_0][vto_main_0]concat=n=3:v=1:a=0" in inserted_graph
             assert "xfade=transition=fade:duration=0.500000000:offset=0" in inserted_graph and "trim=end_frame=30" in inserted_graph
             assert "concat=n=3:v=1:a=0" in inserted_graph and "anullsrc=r=48000:cl=stereo,atrim=duration=0.500000000" in inserted_graph
             assert "afade=t=out" in inserted_graph and "afade=t=in" in inserted_graph and "acrossfade" not in inserted_graph

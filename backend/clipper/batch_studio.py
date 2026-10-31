@@ -289,6 +289,7 @@ def _queue_mood(conn, item, batch):
 
 def _queue_clip(conn, item, batch):
     from .subtitles import composition_signature
+    from .media import MAX_OUTPUT_SECONDS, output_scenes, scene_output_duration
 
     clip = conn.execute("SELECT * FROM clips WHERE id=?", (item["clip_id"],)).fetchone()
     if clip is None:
@@ -298,9 +299,10 @@ def _queue_clip(conn, item, batch):
         raise HTTPException(404, "Video source was deleted.")
     _managed_source(source)
     edit = json.loads(clip["edit_json"])
+    scenes = output_scenes(dict(clip), edit)
+    if scene_output_duration(scenes) > MAX_OUTPUT_SECONDS:
+        raise HTTPException(422, f"Final output cannot exceed {MAX_OUTPUT_SECONDS} seconds. Shorten the timeline before rendering.")
     if edit.get("subtitle_enabled") and edit.get("subtitle_timebase") == "output":
-        from .media import output_scenes
-        scenes = output_scenes(dict(clip), edit)
         signature = composition_signature(scenes)
         active_id = edit.get("subtitle_active_track_id")
         active = next((track for track in edit.get("subtitle_tracks", []) if track.get("id") == active_id), None)

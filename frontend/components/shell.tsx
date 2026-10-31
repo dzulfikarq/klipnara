@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { CalendarDays, Film, FolderOpen, Gauge, Home, Layers, MoreHorizontal, Scissors, Settings2, UsersRound } from "lucide-react";
@@ -40,7 +41,7 @@ export function Shell({ children }: { children: ReactNode }) {
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <Link href="/" className="brand"><span className="brand-wordmark">Klipnara<small>AI VIDEO STUDIO</small></span></Link>
+        <Link href="/" className="brand" aria-label="Klipnara · AI Video Studio"><Image src="/branding/klipnara-mark.png" alt="" width={38} height={38} className="brand-mark"/><span className="brand-wordmark">Klipnara<small>AI VIDEO STUDIO</small></span></Link>
         <nav className="side-nav" aria-label="Navigasi utama">
           {sections.map((section) => <div className="nav-group" key={section.label}>
             <div className="nav-caption">{section.label}</div>
@@ -64,7 +65,7 @@ export function Shell({ children }: { children: ReactNode }) {
         </div>
       </aside>
       <div className="main-column">
-        <header className="topbar"><div className="mobile-brand">Klipnara</div><div className="breadcrumb">Workspace <span>/</span> <strong>{current}</strong></div><div className="topbar-right"><span className="privacy-pill"><i/>LOCAL-FIRST</span><ThemeToggle compact/><Link href="/settings" aria-label="Pengaturan" className="avatar">K</Link></div></header>
+        <header className="topbar"><div className="topbar-inner"><div className="mobile-brand"><Image src="/branding/klipnara-mark.png" alt="" width={26} height={26}/><span>Klipnara</span></div><div className="breadcrumb">Workspace <span>/</span> <strong>{current}</strong></div><div className="topbar-right"><span className="privacy-pill"><i/>LOCAL-FIRST</span><ThemeToggle compact/><Link href="/settings" aria-label="Pengaturan" className="avatar">K</Link></div></div></header>
         <main className="main-content">{children}</main>
       </div>
     </div>

@@ -8,16 +8,24 @@ import { useConfirm } from "@/components/confirm-dialog";
 import { API, formatDuration, request, reviewStatusLabel } from "@/lib/api";
 import type { ReviewStatus } from "@/lib/api";
 import { clipEditorStatus } from "@/lib/clip-editor-state.mjs";
-import { deleteOutputRange, deleteScene, duplicateScene, outputToSource, pushEditHistory, redoEditHistory, reorderScene, sceneTimeline, splitScene, undoEditHistory, updateSceneRange } from "@/lib/clip-timeline.mjs";
+import { compositionSignature, deleteOutputRangeEdit, deleteScene, duplicateScene, formatTimeInput, maxSceneTransitionDuration, outputToSource, pushEditHistory, quantizeTransitionDuration, reconcileSceneTransitions, redoEditHistory, reorderScene, sceneSourceOwnership, sceneTimeline, sceneTransition, splitScene, transitionKey, transitionMode, undoEditHistory, updateSceneRange, validateSceneTransitions } from "@/lib/clip-timeline.mjs";
 import { activeWordIndexAt, joinWordText, validWordAlignment } from "@/lib/word-pop.mjs";
 
 type Word = { id: string; text: string; start: number | null; end: number | null; speaker_id?: string };
 type Segment = { id: string; start: number; end: number; text: string; words?: Word[]; word_alignment_reviewed?: boolean | null; speaker_id?: string; source_segment_id?: string; original_text?: string; edited?: boolean };
 type SubtitleTrack = { id: string; source_type: "manual" | "generated" | "imported" | "translation"; language: string; provider?: string | null; model?: string | null; timebase: "output" | "source" | "clip"; segments: Segment[]; transcript_text?: string | null; composition_signature?: string | null; composition_fingerprint?: string | null; source_track_id?: string | null; source_fingerprint?: string | null; word_timestamps?: boolean; speaker_identification?: boolean; edited?: boolean };
-type Scene = { id: string; source_start: number; source_end: number; order: number; role: "hook" | "body" | "ending"; duration?: number; timeline_start?: number; timeline_end?: number };
+type SceneTransition = { type: "none" | "crossfade" | "dip_to_black" | "zoom_blur" | "wipeleft" | "wiperight" | "wipeup" | "wipedown" | "slideleft" | "slideright" | "slideup" | "slidedown" | "smoothleft" | "smoothright" | "smoothup" | "smoothdown" | "circleopen" | "circleclose" | "dissolve" | "pixelize" | "radial" | "fadewhite"; duration: number; timing_mode?: "insert_slot" | "overlap"; smooth_audio: boolean };
+type Scene = { id: string; source_start: number; source_end: number; order: number; role: "hook" | "body" | "ending"; duration?: number; timeline_start?: number; timeline_end?: number; transition_to_next?: SceneTransition; transition_duration?: number; transition_frames?: number; transition_timing_mode?: "insert_slot" | "overlap"; transition_start?: number; transition_end?: number };
+const transitionLabels: Record<SceneTransition["type"], string> = {
+  none: "None · Hard Cut", crossfade: "Crossfade", dip_to_black: "Dip to Black", zoom_blur: "Zoom Blur · legacy Crossfade fallback",
+  wipeleft: "Wipe Left", wiperight: "Wipe Right", wipeup: "Wipe Up", wipedown: "Wipe Down",
+  slideleft: "Slide Left", slideright: "Slide Right", slideup: "Slide Up", slidedown: "Slide Down",
+  smoothleft: "Smooth Left", smoothright: "Smooth Right", smoothup: "Smooth Up", smoothdown: "Smooth Down",
+  circleopen: "Circle Open", circleclose: "Circle Close", dissolve: "Dissolve", pixelize: "Pixelize", radial: "Radial", fadewhite: "Fade to White",
+};
 type Audio = { volume: number; muted: boolean; fade_in: number; fade_out: number; normalize: boolean; target_lufs: number; limiter: boolean };
 type TitleOverlay = { enabled: boolean; text: string; font: "Arial" | "Georgia" | "Segoe UI" | "Tahoma" | "Trebuchet MS" | "Times New Roman"; size: number; color: string; position: number; duration: number; fade_in: number; fade_out: number };
-type Edit = { trim_start: number; trim_end: number; scene_mode: "single" | "multi"; scenes: Scene[]; subtitle_enabled: boolean; subtitle_mode: "off" | "manual" | "auto" | "import"; subtitle_segments: Segment[]; subtitle_tracks: SubtitleTrack[]; subtitle_active_track_id: string | null; subtitle_active_translation_id: string | null; subtitle_timebase: "clip" | "source" | "output"; subtitle_display_mode: "original" | "translated" | "bilingual"; subtitle_caption_mode: "sentence" | "phrase" | "word" | "karaoke" | "word_pop"; subtitle_preset: string; subtitle_animation: "none" | "fade" | "pop" | "scale"; subtitle_animation_intensity: number; subtitle_animation_duration: number; subtitle_font: string; subtitle_outline_color: string; subtitle_highlight_color: string; subtitle_outline: number; subtitle_shadow: number; subtitle_background: boolean; subtitle_alignment: "top" | "center" | "bottom"; subtitle_caption_width: number; subtitle_safe_margin: number; style: "Clean" | "Bold" | "Highlight"; resolution: "720" | "1080"; fps: 30 | 60; quality: "smaller" | "balanced" | "high"; crop_x: number; crop_y: number; subtitle_size: number; subtitle_position: number; subtitle_color: string; subtitle_overrides: Record<string, string>; audio: Audio; title_overlay: TitleOverlay };
+type Edit = { trim_start: number; trim_end: number; scene_mode: "single" | "multi"; scenes: Scene[]; transitions?: Record<string, SceneTransition>; subtitle_enabled: boolean; subtitle_mode: "off" | "manual" | "auto" | "import"; subtitle_segments: Segment[]; subtitle_tracks: SubtitleTrack[]; subtitle_active_track_id: string | null; subtitle_active_translation_id: string | null; subtitle_timebase: "clip" | "source" | "output"; subtitle_display_mode: "original" | "translated" | "bilingual"; subtitle_caption_mode: "sentence" | "phrase" | "word" | "karaoke" | "word_pop"; subtitle_preset: string; subtitle_animation: "none" | "fade" | "pop" | "scale"; subtitle_animation_intensity: number; subtitle_animation_duration: number; subtitle_font: string; subtitle_outline_color: string; subtitle_highlight_color: string; subtitle_outline: number; subtitle_shadow: number; subtitle_background: boolean; subtitle_alignment: "top" | "center" | "bottom"; subtitle_caption_width: number; subtitle_safe_margin: number; style: "Clean" | "Bold" | "Highlight"; resolution: "720" | "1080"; fps: 30 | 60; quality: "smaller" | "balanced" | "high"; crop_x: number; crop_y: number; subtitle_size: number; subtitle_position: number; subtitle_color: string; subtitle_overrides: Record<string, string>; audio: Audio; title_overlay: TitleOverlay };
 type YouTubeReference = { canonical_url: string; video_id: string; start: number; end: number; source_association: "user_selected" | "auto_imported" };
 type Data = { clip: { id: string; source_id: string; title: string; reason: string; start: number; end: number; rank: number; status: string; origin: string; review_status: ReviewStatus; rendered: boolean; edit: Edit; youtube_reference: YouTubeReference | null }; source: { name: string; duration: number; audio_codec: string | null }; transcript: { start: number; end: number; text: string }[]; subtitle_stt: { local: boolean; openai: boolean; gemini: boolean }; subtitle_status: { composition_signature: string; composition_fingerprint: string; stale_track_ids: string[]; outdated_translation_ids: string[] }; jobs: Job[] };
 type Job = { id: string; kind: string; provider?: string; status: string; phase: string; progress: number | null; message: string };
@@ -35,6 +43,10 @@ function groupCaptionWords(words: Word[]) {
   }
   if (current.length) groups.push(current);
   return groups;
+}
+
+function isAbortError(error: unknown) {
+  return typeof error === "object" && error !== null && "name" in error && error.name === "AbortError";
 }
 
 export default function ClipEditorPage() {
@@ -62,12 +74,14 @@ export default function ClipEditorPage() {
   const [referenceBusy, setReferenceBusy] = useState(false);
   const [subtitleBusy, setSubtitleBusy] = useState(false);
   const [subtitleSaving, setSubtitleSaving] = useState(false);
+  const [saveRequestBusy, setSaveRequestBusy] = useState(false);
   const [subtitleNotice, setSubtitleNotice] = useState("");
   const [translationProvider, setTranslationProvider] = useState<"openai" | "gemini">("gemini");
   const [translationTarget, setTranslationTarget] = useState<"id-ID" | "en-US">("id-ID");
   const [subtitleSelectedIds, setSubtitleSelectedIds] = useState<string[]>([]);
   const [translationDirty, setTranslationDirty] = useState(false);
   const [selectedSceneId, setSelectedSceneId] = useState("");
+  const [transitionPanelKey, setTransitionPanelKey] = useState("");
   const [compositionTime, setCompositionTime] = useState(0);
   const [previewPlaying, setPreviewPlaying] = useState(false);
   const [timelineCollapsed, setTimelineCollapsed] = useState(false);
@@ -83,11 +97,13 @@ export default function ClipEditorPage() {
   const subtitleSaveQueue = useRef<Promise<void>>(Promise.resolve());
   const subtitleSaveFailure = useRef("");
   const previewRef = useRef<HTMLVideoElement>(null);
+  const transitionPreviewRef = useRef<HTMLVideoElement>(null);
   const previewStageRef = useRef<HTMLDivElement>(null);
   const previewSceneId = useRef("");
+  const previewInInsertSlot = useRef(false);
   const editRef = useRef<Edit | null>(null);
   const historyRef = useRef<EditHistory>({ undo: [], redo: [] });
-  const timelineStateRef = useRef<{ time: number; scenes: Scene[] }>({ time: 0, scenes: [] });
+  const timelineStateRef = useRef<{ time: number; scenes: Scene[]; transitions: Record<string, SceneTransition>; fps: 30 | 60 }>({ time: 0, scenes: [], transitions: {}, fps: 30 });
   const timelineGesture = useRef<
     | { kind: "select"; start: number }
     | { kind: "resize"; id: string; edge: "start" | "end"; originX: number; sourceStart: number; sourceEnd: number; baseEdit: Edit }
@@ -168,13 +184,6 @@ export default function ClipEditorPage() {
     return () => { alive = false; clearTimeout(timer); };
   }, [job?.id]);
   useEffect(() => {
-    const video = previewRef.current;
-    if (!video || !edit) return;
-    video.volume = Math.max(0, Math.min(1, edit.audio.volume));
-    video.muted = previewMuted ?? edit.audio.muted;
-  }, [data?.clip.id, data?.clip.source_id, edit?.audio.volume, edit?.audio.muted, previewMuted, previewRendered]);
-
-  useEffect(() => {
     const syncFullscreen = () => setPreviewFullscreen(document.fullscreenElement === previewStageRef.current);
     document.addEventListener("fullscreenchange", syncFullscreen);
     return () => document.removeEventListener("fullscreenchange", syncFullscreen);
@@ -192,7 +201,7 @@ export default function ClipEditorPage() {
       source_end: data.clip.start + edit.trim_end,
       order: 0,
     }];
-    return sceneTimeline(scenes) as Scene[];
+    return sceneTimeline(scenes, edit.transitions, edit.fps) as Scene[];
   }, [data?.clip.id, data?.clip.start, edit]);
   const visibleSegments = useMemo(() => edit?.subtitle_segments.map((segment, index) => ({
     ...segment,
@@ -201,17 +210,31 @@ export default function ClipEditorPage() {
     end: edit.subtitle_timebase === "output" || edit.subtitle_timebase === "source" ? segment.end : sourceStart + segment.end,
   })).sort((a, b) => a.start - b.start).filter((segment) => edit.subtitle_timebase === "output"
     ? segment.start < (compositionScenes.at(-1)?.timeline_end || 0) && segment.end > 0
-    : compositionScenes.some((scene) => segment.end > scene.source_start && segment.start < scene.source_end)) || [], [compositionScenes, edit, sourceStart]);
+    : compositionScenes.some((scene, index) => {
+      const ownership = sceneSourceOwnership(compositionScenes, index);
+      return segment.end > ownership.start && segment.start < ownership.end;
+    })) || [], [compositionScenes, edit, sourceStart]);
   const displayedScenes = resizePreview || compositionScenes;
   const timelineDuration = compositionScenes.at(-1)?.timeline_end || 0;
   const timelineScale = timelineDuration ? Math.max(timelineDuration * sceneZoom, 360) / timelineDuration : sceneZoom;
   const timelineWidth = Math.max(timelineDuration * timelineScale, 360);
-  const currentSourceTime = outputToSource(compositionScenes, compositionTime)?.sourceTime ?? sourceStart;
-  const sceneSignature = compositionScenes.map((scene) => `${scene.id}:${scene.source_start.toFixed(3)}:${scene.source_end.toFixed(3)}`).join("|");
+  const currentSourceTime = outputToSource(compositionScenes, compositionTime, edit?.transitions, edit?.fps)?.sourceTime ?? sourceStart;
+  const sceneSignature = compositionSignature(compositionScenes, edit?.transitions, edit?.fps);
+  const activePreviewTransition = useMemo(() => {
+    if (!edit || previewRendered) return null;
+    return outputToSource(compositionScenes, compositionTime, edit.transitions, edit.fps)?.transition || null;
+  }, [compositionScenes, compositionTime, edit?.transitions, edit?.fps, previewRendered]);
+  const transitionOpacity = activePreviewTransition?.type === "dip_to_black"
+    ? { from: activePreviewTransition.progress < 0.5 ? 1 - activePreviewTransition.progress * 2 : 0, to: activePreviewTransition.progress < 0.5 ? 0 : (activePreviewTransition.progress - 0.5) * 2 }
+    : { from: 1 - (activePreviewTransition?.progress || 0), to: activePreviewTransition?.progress || 0 };
+  const subtitleSourceTime = activePreviewTransition && activePreviewTransition.progress >= 0.5
+    ? activePreviewTransition.toSourceTime
+    : activePreviewTransition?.fromSourceTime ?? currentSourceTime;
   const timelineSubtitleSegments = useMemo(() => visibleSegments.flatMap((segment) => {
     if (edit?.subtitle_timebase === "output") return [{ ...segment, id: segment.id, outputStart: segment.start, outputEnd: segment.end }];
-    return compositionScenes.flatMap((scene) => {
-      const start = Math.max(scene.source_start, segment.start), end = Math.min(scene.source_end, segment.end);
+    return compositionScenes.flatMap((scene, index) => {
+      const ownership = sceneSourceOwnership(compositionScenes, index);
+      const start = Math.max(ownership.start, segment.start), end = Math.min(ownership.end, segment.end);
       return start < end ? [{ ...segment, id: `${scene.id}-${segment.id}`, outputStart: (scene.timeline_start || 0) + start - scene.source_start, outputEnd: (scene.timeline_start || 0) + end - scene.source_start }] : [];
     });
   }), [visibleSegments, compositionScenes, edit?.subtitle_timebase]);
@@ -223,24 +246,118 @@ export default function ClipEditorPage() {
   ));
 
   useEffect(() => {
-    timelineStateRef.current = { time: compositionTime, scenes: compositionScenes };
-  }, [compositionTime, compositionScenes]);
+    const video = previewRef.current;
+    const transitionVideo = transitionPreviewRef.current;
+    if (!video || !edit) return;
+    const baseVolume = Math.max(0, Math.min(1, edit.audio.volume));
+    let fromVolume = 1;
+    if (activePreviewTransition?.timing_mode === "overlap") {
+      fromVolume = activePreviewTransition.smooth_audio ? 1 - activePreviewTransition.progress : activePreviewTransition.progress < 0.5 ? 1 : 0;
+    } else if (activePreviewTransition?.timing_mode === "insert_slot") fromVolume = 0;
+    else {
+      const outgoing = compositionScenes.find((scene) => scene.transition_timing_mode === "insert_slot"
+        && scene.transition_to_next?.type !== "none" && scene.transition_to_next?.smooth_audio
+        && compositionTime >= (scene.timeline_end || 0) - (scene.transition_duration || 0) / 2
+        && compositionTime < (scene.timeline_end || 0));
+      const incoming = compositionScenes.find((scene, index) => index > 0
+        && compositionScenes[index - 1].transition_timing_mode === "insert_slot"
+        && compositionScenes[index - 1].transition_to_next?.type !== "none"
+        && compositionScenes[index - 1].transition_to_next?.smooth_audio
+        && compositionTime >= (scene.timeline_start || 0)
+        && compositionTime < (scene.timeline_start || 0) + (compositionScenes[index - 1].transition_duration || 0) / 2);
+      if (outgoing) fromVolume = Math.max(0, Math.min(1, ((outgoing.timeline_end || 0) - compositionTime) / Math.max(0.001, (outgoing.transition_duration || 0) / 2)));
+      else if (incoming) fromVolume = Math.max(0, Math.min(1, (compositionTime - (incoming.timeline_start || 0)) / Math.max(0.001, (incoming.transition_duration || 0) / 2)));
+    }
+    video.volume = baseVolume * fromVolume;
+    video.muted = previewMuted ?? edit.audio.muted;
+    if (!transitionVideo) return;
+    transitionVideo.muted = previewMuted ?? (activePreviewTransition ? edit.audio.muted : true);
+    if (previewRendered) {
+      transitionVideo.pause();
+      transitionVideo.volume = 0;
+      if (previewPlaying && video.paused) void video.play().catch((reason) => {
+        if (!isAbortError(reason)) setError("Browser tidak dapat memulai preview video.");
+      });
+      else if (!previewPlaying) video.pause();
+      return;
+    }
+    if (!activePreviewTransition) {
+      video.volume = baseVolume * fromVolume;
+      transitionVideo.volume = 0;
+      transitionVideo.pause();
+      if (previewPlaying && video.paused) void video.play().catch((reason) => {
+        if (!isAbortError(reason)) setError("Browser tidak dapat memulai preview video.");
+      });
+      else if (!previewPlaying && !video.paused) video.pause();
+      return;
+    }
+    if (activePreviewTransition.timing_mode === "insert_slot") {
+      const target = activePreviewTransition.toSourceTime;
+      if (transitionVideo.readyState >= HTMLMediaElement.HAVE_METADATA && !transitionVideo.seeking
+        && (!Number.isFinite(transitionVideo.currentTime) || Math.abs(transitionVideo.currentTime - target) > 0.2)) transitionVideo.currentTime = target;
+      video.volume = 0;
+      transitionVideo.volume = 0;
+      video.pause();
+      transitionVideo.pause();
+      return;
+    }
+    const target = activePreviewTransition.toSourceTime;
+    if (transitionVideo.readyState >= HTMLMediaElement.HAVE_METADATA && !transitionVideo.seeking
+      && (!Number.isFinite(transitionVideo.currentTime) || Math.abs(transitionVideo.currentTime - target) > 0.2)) transitionVideo.currentTime = target;
+    transitionVideo.volume = baseVolume * (activePreviewTransition.smooth_audio
+      ? activePreviewTransition.progress
+      : activePreviewTransition.progress < 0.5 ? 0 : 1);
+    if (previewPlaying) {
+      if (video.paused) void video.play().catch((reason) => {
+        if (!isAbortError(reason)) setError("Browser tidak dapat menyinkronkan preview transisi.");
+      });
+      if (transitionVideo.paused) void transitionVideo.play().catch((reason) => {
+        if (!isAbortError(reason)) setError("Browser tidak dapat menyinkronkan preview transisi.");
+      });
+    } else { video.pause(); transitionVideo.pause(); }
+  }, [activePreviewTransition, compositionScenes, compositionTime, edit?.audio.volume, edit?.audio.muted, previewMuted, previewPlaying, previewRendered]);
+
+  useEffect(() => {
+    if (!previewPlaying || previewRendered || activePreviewTransition?.timing_mode !== "insert_slot") return;
+    let previous = performance.now();
+    let frame = 0;
+    const advance = (now: number) => {
+      const elapsed = Math.min(0.1, Math.max(0, (now - previous) / 1000));
+      previous = now;
+      setCompositionTime((time) => Math.min(timelineDuration, time + elapsed));
+      frame = requestAnimationFrame(advance);
+    };
+    frame = requestAnimationFrame(advance);
+    return () => cancelAnimationFrame(frame);
+  }, [activePreviewTransition?.timing_mode, activePreviewTransition?.start, activePreviewTransition?.end, previewPlaying, previewRendered, timelineDuration]);
+
+  useEffect(() => {
+    timelineStateRef.current = { time: compositionTime, scenes: compositionScenes, transitions: edit?.transitions || {}, fps: edit?.fps || 30 };
+  }, [compositionTime, compositionScenes, edit?.transitions, edit?.fps]);
 
   useEffect(() => {
     const video = previewRef.current;
     if (!video || previewRendered) return;
-    const { time, scenes } = timelineStateRef.current;
+    const { time, scenes, transitions } = timelineStateRef.current;
     const total = scenes.at(-1)?.timeline_end || 0;
     const clampedTime = Math.max(0, Math.min(total, time));
     if (clampedTime !== time) setCompositionTime(clampedTime);
-    const mapped = outputToSource(scenes, clampedTime);
+    const mapped = outputToSource(scenes, clampedTime, transitions, timelineStateRef.current.fps);
     if (!mapped) return;
+    previewInInsertSlot.current = mapped.transition?.timing_mode === "insert_slot";
+    if (previewSceneId.current !== mapped.sceneId) setSelectedSceneId(mapped.sceneId);
     previewSceneId.current = mapped.sceneId;
     if (Math.abs(video.currentTime - mapped.sourceTime) > 0.08) video.currentTime = mapped.sourceTime;
-  }, [sceneSignature, previewRendered]);
+  }, [sceneSignature, compositionTime, edit?.fps, previewRendered]);
 
   const commitEdit = (next: Edit, previous = editRef.current): boolean => {
     if (!previous) return false;
+    const previousScenes = previous.scene_mode === "multi" ? previous.scenes : previous.scenes.slice(0, 1);
+    const nextScenes = next.scene_mode === "multi" ? next.scenes : next.scenes.slice(0, 1);
+    const scenesChanged = previous.scene_mode !== next.scene_mode || JSON.stringify(previousScenes) !== JSON.stringify(nextScenes);
+    next = { ...next, transitions: scenesChanged
+      ? reconcileSceneTransitions(previousScenes, nextScenes, next.transitions ?? previous.transitions ?? {}, next.fps)
+      : next.transitions ?? previous.transitions ?? {} };
     if (JSON.stringify(next) === JSON.stringify(previous)) return true;
     if (next.scene_mode === "single" && (
       !Number.isFinite(next.trim_start) || !Number.isFinite(next.trim_end)
@@ -249,13 +366,14 @@ export default function ClipEditorPage() {
     )) {
       setError("Trim Single Scene harus berada di dalam kandidat dan memiliki durasi positif."); return false;
     }
-    if (next.scene_mode === "multi" && (
-      next.scenes.length < 1 || next.scenes.length > 12
-      || next.scenes.reduce((sum, scene) => sum + scene.source_end - scene.source_start, 0) > 180
-      || next.scenes.some((scene) => !Number.isFinite(scene.source_start) || !Number.isFinite(scene.source_end) || scene.source_start < 0 || scene.source_end > (data?.source.duration || 0) || scene.source_end - scene.source_start < 0.5)
-    )) {
-      setError("Multi-Scene dibatasi 12 scene, 180 detik total, dan 0,5 detik minimum per scene."); return false;
+    if (next.scene_mode === "multi") {
+      if (next.scenes.length < 1 || next.scenes.length > 12
+        || next.scenes.some((scene) => !Number.isFinite(scene.source_start) || !Number.isFinite(scene.source_end) || scene.source_start < 0 || scene.source_end > (data?.source.duration || 0) || scene.source_end - scene.source_start < 0.5)) {
+        setError("Multi-Scene dibatasi maksimal 12 scene dan minimal 0,5 detik per scene."); return false;
+      }
     }
+    const transitionError = validateSceneTransitions(nextScenes, next.transitions, next.fps);
+    if (transitionError) { setError(transitionError); return false; }
     historyRef.current = pushEditHistory(historyRef.current, previous);
     editRef.current = next;
     setEdit(next);
@@ -329,11 +447,13 @@ export default function ClipEditorPage() {
     const video = previewRef.current;
     if (!video) return;
     if (previewRendered) {
+      previewInInsertSlot.current = false;
       video.currentTime = next;
       return;
     }
-    const mapped = outputToSource(compositionScenes, next);
+    const mapped = outputToSource(compositionScenes, next, edit.transitions, edit.fps);
     if (!mapped) return;
+    previewInInsertSlot.current = mapped.transition?.timing_mode === "insert_slot";
     previewSceneId.current = mapped.sceneId;
     setSelectedSceneId(mapped.sceneId);
     video.currentTime = mapped.sourceTime;
@@ -342,17 +462,18 @@ export default function ClipEditorPage() {
   const markOut = () => setCutRange((current) => ({ start: current?.start != null && current.start < compositionTime ? current.start : 0, end: compositionTime }));
   const deleteSelectedRange = () => {
     if (!edit || !cutRange) return;
-    const scenes = deleteOutputRange(compositionScenes, cutRange.start, cutRange.end) as Scene[] | null;
-    if (!scenes) { setError("Bagian tersisa harus berdurasi minimal 0,5 detik dan komposisi maksimal 12 scene."); return; }
+    const deleted = deleteOutputRangeEdit(compositionScenes, cutRange.start, cutRange.end, edit.transitions, edit.fps);
+    if (!deleted) { setError("Bagian tersisa harus berdurasi minimal 0,5 detik dan komposisi maksimal 12 scene."); return; }
+    const { scenes, transitions } = deleted as { scenes: Scene[]; transitions: Record<string, SceneTransition> };
     const next = edit.scene_mode === "single" && scenes.length === 1
       ? editWithScenes(edit, scenes)
       : toSourceTimedEdit(edit, scenes);
-    if (!commitEdit(next)) return;
+    if (!commitEdit({ ...next, transitions })) return;
     setCutRange(null);
     setSelectedSceneId(scenes[0]?.id || "");
-    const outputTime = Math.min(cutRange.start, scenes.reduce((sum, scene) => sum + scene.source_end - scene.source_start, 0));
+    const outputTime = Math.min(cutRange.start, sceneTimeline(scenes, transitions, edit.fps).at(-1)?.timeline_end || 0);
     setCompositionTime(outputTime);
-    const mapped = outputToSource(scenes, outputTime);
+    const mapped = outputToSource(scenes, outputTime, transitions, edit.fps);
     if (mapped) {
       previewSceneId.current = mapped.sceneId;
       if (previewRendered && previewRef.current) previewRef.current.currentTime = outputTime;
@@ -362,7 +483,7 @@ export default function ClipEditorPage() {
   };
   const splitAtPlayhead = () => {
     if (!edit) return;
-    const mapped = outputToSource(compositionScenes, compositionTime);
+    const mapped = outputToSource(compositionScenes, compositionTime, edit.transitions, edit.fps);
     if (!mapped) return;
     const scenes = splitScene(compositionScenes, mapped.sceneId, mapped.sourceTime) as Scene[] | null;
     if (!scenes) { setError("Split perlu menyisakan minimal 0,5 detik per scene; batas 12 scene."); return; }
@@ -403,6 +524,78 @@ export default function ClipEditorPage() {
     const scenes = compositionScenes.map((scene) => ({ ...scene, role: scene.id === id ? role : scene.role === role ? "body" as const : scene.role }));
     commitEdit(editWithScenes(edit, scenes));
   };
+  const updateSceneTransition = (key: string, changes: Partial<SceneTransition>) => {
+    const currentEdit = editRef.current;
+    if (!currentEdit || currentEdit.scene_mode !== "multi") return;
+    const scenes = sceneTimeline(currentEdit.scenes, currentEdit.transitions, currentEdit.fps) as Scene[];
+    const index = scenes.findIndex((scene, position) => position < scenes.length - 1 && transitionKey(scene.id, scenes[position + 1].id) === key);
+    if (index < 0) return;
+    const current = sceneTransition(scenes, index, currentEdit.transitions);
+    if (changes.type === "none") {
+      const transitions = { ...(currentEdit.transitions || {}) };
+      delete transitions[key];
+      commitEdit({ ...currentEdit, transitions }, currentEdit);
+      return;
+    }
+    const next = { ...current, ...changes };
+    if (changes.type && current.type === "none") {
+      next.duration = 0.5;
+      next.timing_mode = "insert_slot";
+    }
+    if (changes.duration != null) {
+      if (!Number.isFinite(changes.duration) || changes.duration <= 0) { setError("Durasi transisi harus angka positif."); return; }
+      next.duration = quantizeTransitionDuration(changes.duration, currentEdit.fps);
+    }
+    const maximum = maxSceneTransitionDuration(scenes, index, currentEdit.transitions, currentEdit.fps, next.timing_mode);
+    const timingChanged = changes.duration != null || changes.timing_mode != null || Boolean(changes.type && current.type === "none");
+    if (timingChanged && (next.duration < 0.1 || next.duration > maximum + 1e-6)) {
+      setError(`Durasi transisi harus 0,1–${formatTimeInput(maximum)} detik untuk mode ini.`); return;
+    }
+    const transitions = { ...(currentEdit.transitions || {}), [key]: next };
+    const issue = validateSceneTransitions(scenes, transitions, currentEdit.fps);
+    if (issue) { setError(issue); return; }
+    commitEdit({ ...currentEdit, transitions }, currentEdit);
+  };
+  const applyTransitionToAll = () => {
+    if (!edit) return;
+    const index = compositionScenes.findIndex((scene, position) => position < compositionScenes.length - 1 && transitionKey(scene.id, compositionScenes[position + 1].id) === transitionPanelKey);
+    if (index < 0) return;
+    const selected = sceneTransition(compositionScenes, index, edit.transitions);
+    const transitions: Record<string, SceneTransition> = {};
+    if (selected.type !== "none") {
+      for (let boundary = 0; boundary < compositionScenes.length - 1; boundary += 1) {
+        const key = transitionKey(compositionScenes[boundary].id, compositionScenes[boundary + 1].id);
+        const maximum = maxSceneTransitionDuration(compositionScenes, boundary, transitions, edit.fps, selected.timing_mode);
+        if (selected.duration > maximum + 1e-6) continue;
+        const trial = { ...transitions, [key]: { ...selected } };
+        if (!validateSceneTransitions(compositionScenes, trial, edit.fps)) Object.assign(transitions, trial);
+      }
+    }
+    applyEdit((currentEdit) => ({ ...currentEdit, transitions }));
+  };
+  const removeSceneTransition = (key: string) => {
+    const current = editRef.current;
+    if (!current) return;
+    const transitions = { ...(current.transitions || {}) };
+    delete transitions[key];
+    if (commitEdit({ ...current, transitions }, current)) setTransitionPanelKey("");
+  };
+  const previewSceneTransition = () => {
+    if (!activeTransitionBoundary) return;
+    const { from, key } = activeTransitionBoundary;
+    const start = from.transition_start || from.timeline_end || 0;
+    setPreviewRendered(false);
+    setTransitionPanelKey(key);
+    setSelectedSceneId(from.id);
+    setCompositionTime(start);
+    const mapped = outputToSource(compositionScenes, start, edit.transitions, edit.fps);
+    if (mapped && previewRef.current) {
+      previewInInsertSlot.current = mapped.transition?.timing_mode === "insert_slot";
+      previewSceneId.current = mapped.sceneId;
+      previewRef.current.currentTime = mapped.sourceTime;
+    }
+    setPreviewPlaying(true);
+  };
 
   useEffect(() => {
     if (!data || !compositionScenes.length) return;
@@ -410,7 +603,7 @@ export default function ClipEditorPage() {
   }, [data?.clip.id, compositionScenes, selectedSceneId]);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (publishOpen || subtitleBusy || subtitleSaving || Boolean(job && ["queued", "preparing", "rendering"].includes(job.status))) return;
+      if (publishOpen || subtitleBusy || saveRequestBusy || Boolean(job && ["queued", "preparing", "rendering"].includes(job.status))) return;
       const target = event.target as HTMLElement | null;
       if (event.altKey || target?.isContentEditable || target?.closest("input, textarea, select, button, a, [contenteditable=true]")) return;
       const key = event.key.toLowerCase();
@@ -426,7 +619,7 @@ export default function ClipEditorPage() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [publishOpen, subtitleBusy, subtitleSaving, job?.status, compositionTime, cutRange, compositionScenes, edit, selectedSceneId, historyVersion]);
+  }, [publishOpen, subtitleBusy, saveRequestBusy, job?.status, compositionTime, cutRange, compositionScenes, edit, selectedSceneId, historyVersion]);
 
   if (!data || !edit) return <div className="loading-page">{error || "Memuat editor…"}</div>;
   const length = data.clip.end - data.clip.start;
@@ -448,7 +641,7 @@ export default function ClipEditorPage() {
     const outputTimed = current.subtitle_timebase === "output";
     const base = sourceTimed || outputTimed ? 0 : sourceStart;
     const maxTime = sourceTimed ? data.source.duration : outputTimed ? timelineDuration : length;
-    const position = sourceTimed ? currentSourceTime : outputTimed ? compositionTime : currentSourceTime - sourceStart;
+    const position = sourceTimed ? subtitleSourceTime : outputTimed ? compositionTime : subtitleSourceTime - sourceStart;
     const start = Math.max(0, Math.min(maxTime - minSubtitleDuration, position));
     const end = Math.min(maxTime, start + 2);
     return { ...current, subtitle_mode: "manual", subtitle_enabled: true, subtitle_overrides: {}, subtitle_segments: [...current.subtitle_segments, { id: crypto.randomUUID(), start, end, text: "", edited: false }] };
@@ -566,16 +759,17 @@ export default function ClipEditorPage() {
     const mapped: Segment[] = edit.subtitle_segments.flatMap((segment) => {
       const sourceStartTime = edit.subtitle_timebase === "source" ? segment.start : sourceStart + segment.start;
       const sourceEndTime = edit.subtitle_timebase === "source" ? segment.end : sourceStart + segment.end;
-      return compositionScenes.flatMap((scene) => {
-        const start = Math.max(sourceStartTime, scene.source_start), end = Math.min(sourceEndTime, scene.source_end);
+      return compositionScenes.flatMap((scene, index) => {
+        const ownership = sceneSourceOwnership(compositionScenes, index);
+        const start = Math.max(sourceStartTime, ownership.start), end = Math.min(sourceEndTime, ownership.end);
         if (start >= end) return [];
         const delta = (scene.timeline_start || 0) - scene.source_start;
         const words = segment.words?.flatMap((word) => {
           if (word.start == null || word.end == null) return [{ ...word, id: crypto.randomUUID(), start: null, end: null }];
           const wordStart = word.start + (edit.subtitle_timebase === "clip" ? sourceStart : 0);
           const wordEnd = word.end + (edit.subtitle_timebase === "clip" ? sourceStart : 0);
-          if (wordEnd <= scene.source_start || wordStart >= scene.source_end) return [];
-          const source_word_start = Math.max(wordStart, scene.source_start), source_word_end = Math.min(wordEnd, scene.source_end);
+          if (wordEnd <= ownership.start || wordStart >= ownership.end) return [];
+          const source_word_start = Math.max(wordStart, ownership.start), source_word_end = Math.min(wordEnd, ownership.end);
           return [{ ...word, start: source_word_start + delta, end: source_word_end + delta, source_start: source_word_start, source_end: source_word_end }];
         });
         const mappedWords = words?.length ? words : undefined;
@@ -606,10 +800,10 @@ export default function ClipEditorPage() {
     setSubtitleNotice("Cues mapped to current output timeline. Scene edits will make these cues stale; regenerate or remap after scene changes.");
   };
   const save = async () => {
-    setError(""); setSubtitleSaving(true);
+    setError(""); setSubtitleSaving(true); setSaveRequestBusy(true);
     try { const savedEdit = await request<Edit>(`/clips/${data.clip.id}`, { method: "PATCH", body: JSON.stringify(edit) }); subtitleSaveFailure.current = ""; editRef.current = savedEdit; setEdit(savedEdit); setSaved(JSON.stringify(savedEdit)); setPreviewRendered(false); setData((current) => current ? { ...current, clip: { ...current.clip, status: current.clip.rendered ? "needs_render" : current.clip.status, review_status: "needs_review" } } : current); return true; }
     catch (reason) { setError((reason as Error).message); return false; }
-    finally { setSubtitleSaving(false); }
+    finally { setSubtitleSaving(false); setSaveRequestBusy(false); }
   };
   const returnToBatch = async () => {
     if (!batchId || dirty && !(await save())) return;
@@ -803,6 +997,7 @@ export default function ClipEditorPage() {
     if (scene) seekOutput((scene.timeline_start || 0) + sourceTime - scene.source_start);
   };
   const render = async () => {
+    if (timelineDuration > 180) { setError(`Render ditahan: hasil akhir maksimal 3:00. Durasi sekarang ${formatDuration(timelineDuration)}. Hapus bagian hingga 3:00 atau kurang.`); return; }
     if (edit.subtitle_enabled && staleActiveSubtitle) { setError("Subtitle output track stale after scene edits. Choose another track or regenerate/import for current composition."); return; }
     if (edit.subtitle_enabled && edit.subtitle_display_mode !== "original" && (!activeTranslationTrack || translationOutdated)) { setError("Selected translation missing or outdated. Choose Original Only or translate current cues again."); return; }
     if (edit.subtitle_enabled && edit.subtitle_caption_mode === "word_pop" && !wordPopReady) { setError("Word Pop needs reviewed, non-overlapping word timestamps for every visible caption. Add manual timings or use a word-timestamp provider."); return; }
@@ -949,42 +1144,53 @@ export default function ClipEditorPage() {
   };
   const onPreviewLoaded = (event: React.SyntheticEvent<HTMLVideoElement>) => {
     setPreviewUnavailable(false);
-    const mapped = outputToSource(compositionScenes, compositionTime);
+    const mapped = outputToSource(compositionScenes, compositionTime, edit.transitions, edit.fps);
     const time = previewRendered ? 0 : mapped?.sourceTime ?? sourceStart + edit.trim_start;
-    if (mapped && !previewRendered) previewSceneId.current = mapped.sceneId;
+    if (mapped && !previewRendered) {
+      previewInInsertSlot.current = mapped.transition?.timing_mode === "insert_slot";
+      previewSceneId.current = mapped.sceneId;
+    }
     event.currentTarget.currentTime = time;
   };
   const onPreviewTimeUpdate = (event: React.SyntheticEvent<HTMLVideoElement>) => {
     const video = event.currentTarget;
     if (previewRendered) {
-      setCompositionTime(Math.min(timelineDuration, video.currentTime));
+      const outputTime = Math.min(timelineDuration, video.currentTime);
+      setCompositionTime(outputTime);
+      if (outputTime >= timelineDuration - 0.015) setPreviewPlaying(false);
       return;
     }
+    // ponytail: Insert Slot owns output clock; ignore stale source timeupdates until next scene starts.
+    if (previewInInsertSlot.current) return;
     const scene = compositionScenes.find((item) => item.id === previewSceneId.current);
     if (!scene || video.currentTime < scene.source_start - 0.05 || video.currentTime > scene.source_end + 0.5) return;
-    if (video.currentTime >= scene.source_end - 0.015) {
-      const index = compositionScenes.findIndex((item) => item.id === scene?.id);
-      const next = compositionScenes[index + 1];
-      if (next) {
-        previewSceneId.current = next.id;
-        setSelectedSceneId(next.id);
-        setCompositionTime(next.timeline_start || 0);
-        video.currentTime = next.source_start;
-      } else {
-        video.pause();
-        setCompositionTime(timelineDuration);
-      }
+    const outputTime = Math.max(0, Math.min(timelineDuration, (scene.timeline_start || 0) + video.currentTime - scene.source_start));
+    const mapped = outputToSource(compositionScenes, outputTime, edit.transitions, edit.fps);
+    if (!mapped) return;
+    setCompositionTime(outputTime);
+    if (mapped.transition?.timing_mode === "insert_slot") {
+      previewInInsertSlot.current = true;
+      if (Math.abs(video.currentTime - mapped.transition.fromSourceTime) > 0.02) video.currentTime = mapped.transition.fromSourceTime;
       return;
     }
-    setCompositionTime((scene.timeline_start || 0) + video.currentTime - scene.source_start);
+    if (mapped.sceneId !== scene.id) {
+      previewSceneId.current = mapped.sceneId;
+      setSelectedSceneId(mapped.sceneId);
+      video.currentTime = mapped.sourceTime;
+    }
+    if (outputTime >= timelineDuration - 0.015) {
+      video.pause();
+      setCompositionTime(timelineDuration);
+      setPreviewPlaying(false);
+    }
   };
   const togglePlayback = () => {
     const video = previewRef.current;
     if (!video) return;
-    if (video.paused) {
+    if (!previewPlaying) {
       if (compositionTime >= timelineDuration) seekOutput(0);
-      void video.play().catch(() => setError("Browser tidak dapat memulai preview video."));
-    } else video.pause();
+      setPreviewPlaying(true);
+    } else setPreviewPlaying(false);
   };
   const togglePreviewFullscreen = async () => {
     const stage = previewStageRef.current;
@@ -997,7 +1203,6 @@ export default function ClipEditorPage() {
   const switchSceneMode = (mode: Edit["scene_mode"]) => {
     if (mode === edit.scene_mode) return;
     if (mode === "multi") {
-      if (timelineDuration > 180) { setError("Multi-Scene output tidak dapat melebihi 180 detik."); return; }
       if (!commitEdit(toSourceTimedEdit(edit, compositionScenes))) return;
       setSelectedSceneId(compositionScenes[0]?.id || "");
       return;
@@ -1032,8 +1237,8 @@ export default function ClipEditorPage() {
   const subtitleJobRunning = Boolean(job && job.kind !== "render" && ["queued", "preparing", "preparing_audio", "uploading", "transcribing", "processing_result"].includes(job.status));
   const canReview = data.clip.rendered && data.clip.status === "completed" && !dirty && !running && !reviewBusy;
   const videoUrl = previewRendered && data.clip.rendered ? `${API}/api/clips/${data.clip.id}/file` : `${API}/api/sources/${data.clip.source_id}/file`;
-  const subtitleClock = edit.subtitle_timebase === "output" ? compositionTime : edit.subtitle_timebase === "source" ? currentSourceTime : currentSourceTime - sourceStart;
-  const activeSubtitle = visibleSegments.find((segment) => {
+  const subtitleClock = edit.subtitle_timebase === "output" ? compositionTime : edit.subtitle_timebase === "source" ? subtitleSourceTime : subtitleSourceTime - sourceStart;
+  const activeSubtitle = activePreviewTransition?.timing_mode === "insert_slot" && edit.subtitle_timebase !== "output" ? undefined : visibleSegments.find((segment) => {
     const start = edit.subtitle_timebase === "clip" ? segment.start - sourceStart : segment.start;
     const end = edit.subtitle_timebase === "clip" ? segment.end - sourceStart : segment.end;
     return start <= subtitleClock && end > subtitleClock;
@@ -1099,7 +1304,19 @@ export default function ClipEditorPage() {
   const captionAnimationClass = edit.subtitle_caption_mode === "word_pop"
     ? wordPopAnimating ? edit.subtitle_animation === "fade" ? "word-pop-preview-fade" : edit.subtitle_animation === "pop" ? "word-pop-preview-pop" : "word-pop-preview-animation" : ""
     : edit.subtitle_animation === "fade" ? "caption-anim-fade" : edit.subtitle_animation === "pop" || edit.subtitle_animation === "scale" ? "caption-anim-pop" : "";
-  const timelineScenes = sceneTimeline(displayedScenes) as Scene[];
+  const timelineScenes = sceneTimeline(displayedScenes, edit.transitions, edit.fps) as Scene[];
+  const transitionBoundaries = compositionScenes.slice(0, -1).map((from, index) => ({
+    from, to: compositionScenes[index + 1], index,
+    key: transitionKey(from.id, compositionScenes[index + 1].id),
+    transition: sceneTransition(compositionScenes, index, edit.transitions),
+  }));
+  const activeTransitionBoundary = transitionBoundaries.find((boundary) => boundary.key === transitionPanelKey) || null;
+  const activeTransitionMaximum = activeTransitionBoundary ? maxSceneTransitionDuration(compositionScenes, activeTransitionBoundary.index, edit.transitions, edit.fps, activeTransitionBoundary.transition.timing_mode) : 0;
+  const activeTransitionDuration = activeTransitionBoundary
+    ? activeTransitionBoundary.transition.type === "none" ? activeTransitionBoundary.transition.duration
+      : activeTransitionBoundary.from.transition_duration ?? activeTransitionBoundary.transition.duration
+    : 0;
+  const activeTransitionCount = transitionBoundaries.filter(({ transition }) => transition.type !== "none").length;
   const selectedScene = compositionScenes.find((scene) => scene.id === selectedSceneId) || compositionScenes[0];
   const validCutRange = Boolean(cutRange && cutRange.end - cutRange.start >= 0.001 && cutRange.end <= timelineDuration);
 
@@ -1128,22 +1345,44 @@ export default function ClipEditorPage() {
       </section>
       {job && <section className="panel editor-job" aria-live="polite"><div><strong>{phaseName[job.status] || job.phase}</strong><span>{job.message}</span>{job.progress != null && <progress max={1} value={job.progress}/>}</div><div>{subtitleJobRunning && <button className="button button-outline" type="button" onClick={() => void cancelJob()}><X size={13}/> Batalkan</button>}{["failed", "cancelled"].includes(job.status) && <button className="button button-outline" type="button" onClick={() => void retryJob()}><RotateCcw size={13}/> Retry</button>}</div></section>}
      {subtitleNotice && <div className="notice notice-success"><CheckCircle2 size={15}/>{subtitleNotice}</div>}
-     {error && <div className="notice notice-error"><AlertCircle size={15}/>{error}</div>}
+      {error && <div className="notice notice-error editor-error-toast" role="alert"><span><AlertCircle size={15}/>{error}</span><button type="button" className="icon-button" aria-label="Tutup pesan error" onClick={() => setError("")}><X size={14}/></button></div>}
      {publishNotice && <div className="notice notice-success"><CheckCircle2 size={15}/>Upload masuk antrean. Lihat status di <Link href="/accounts">Publishing History</Link>.</div>}
      {publishError && !publishOpen && <div className="notice notice-error"><AlertCircle size={15}/>{publishError}</div>}
       <div className="clip-editor-workspace">
       <section className={`panel clip-preview-workspace ${previewCollapsed ? "preview-collapsed" : ""}`}>
-       <div className="editor-panel-heading"><div><strong>Preview komposisi</strong><span>{edit.scene_mode === "multi" ? `${compositionScenes.length} scene · hard cut` : "Single Scene · Quick Clip"} · {edit.resolution === "720" ? "720 × 1280" : "1080 × 1920"}</span></div><div className="preview-actions">{data.clip.rendered && <button type="button" className={`preview-toggle ${previewRendered ? "active" : ""}`} onClick={() => { setCompositionTime(0); setPreviewRendered((value) => !value); }}><Eye size={13}/>{previewRendered ? editorStatus.renderOutdated ? "Render lama" : "Hasil render" : "Sumber"}</button>}<button type="button" className="preview-toggle preview-collapse-toggle" aria-expanded={!previewCollapsed} aria-label={previewCollapsed ? "Expand live preview" : "Collapse live preview"} title={previewCollapsed ? "Expand live preview" : "Collapse live preview"} onClick={() => setPreviewCollapsed((value) => !value)}><ChevronDown size={13}/></button><span className="local-only-pill"><LockKeyhole size={12}/> LOCAL</span></div></div>
-          <div className="clip-preview-grid"><div ref={previewStageRef} className="portrait-stage clip-composition-stage"><video key={`${videoUrl}-${previewRendered}`} ref={previewRef} src={videoUrl} muted={previewMuted ?? edit.audio.muted} playsInline preload="metadata" style={{ objectFit: "cover", objectPosition: `${edit.crop_x}% ${edit.crop_y}%` }} onLoadedMetadata={onPreviewLoaded} onError={() => setPreviewUnavailable(true)} onTimeUpdate={onPreviewTimeUpdate} onPlay={() => setPreviewPlaying(true)} onPause={() => setPreviewPlaying(false)}/>{edit.title_overlay.enabled && !previewRendered && compositionTime < edit.title_overlay.duration && <div className="preview-title-overlay" style={{ top: `${edit.title_overlay.position}%`, color: edit.title_overlay.color, fontFamily: edit.title_overlay.font, fontSize: `${Math.max(12, edit.title_overlay.size / 3)}px` }}>{edit.title_overlay.text}</div>}{edit.subtitle_enabled && !previewRendered && activeSubtitle && <div className={`preview-caption style-${edit.style.toLowerCase()} ${captionAnimationClass}`} style={captionStyle}>{previewCaption}</div>}{previewUnavailable && <div className="preview-media-unavailable" role="status">Preview tidak tersedia. Draft tetap utuh; periksa file sumber atau MP4 hasil render.</div>}<div className="preview-fullscreen-controls"><button type="button" className="preview-control-icon" aria-label={previewPlaying ? "Pause preview" : "Play preview"} onClick={togglePlayback}>{previewPlaying ? <Pause size={16}/> : <Play size={16}/>}</button><button type="button" className="preview-control-icon" aria-label={(previewMuted ?? edit.audio.muted) ? "Unmute preview" : "Mute preview"} onClick={() => setPreviewMuted(!(previewMuted ?? edit.audio.muted))}>{(previewMuted ?? edit.audio.muted) ? <VolumeX size={16}/> : <Volume2 size={16}/>}</button><button type="button" className="preview-control-icon" aria-label="Exit fullscreen preview" onClick={() => void togglePreviewFullscreen()}><Minimize2 size={16}/></button></div><div className="preview-fullscreen-seek"><input aria-label="Fullscreen output seek" type="range" min="0" max={Math.max(timelineDuration, 0.01)} step="0.01" value={Math.min(compositionTime, timelineDuration)} onChange={(event) => seekOutput(Number(event.target.value))}/><span>{formatDuration(compositionTime)} / {formatDuration(timelineDuration)}</span></div><span className="preview-frame-label"><Film size={12}/> {previewRendered ? "RENDERED MP4" : "LIVE SOURCE PREVIEW"}</span></div>
+        <div className="editor-panel-heading"><div><strong>Preview komposisi</strong><span>{edit.scene_mode === "multi" ? `${compositionScenes.length} scene · ${activeTransitionCount} transisi aktif · Zoom Blur fallback: Crossfade` : "Single Scene · Quick Clip"} · {edit.resolution === "720" ? "720 × 1280" : "1080 × 1920"}</span></div><div className="preview-actions">{data.clip.rendered && <button type="button" className={`preview-toggle ${previewRendered ? "active" : ""}`} onClick={() => { setCompositionTime(0); setPreviewRendered((value) => !value); }}><Eye size={13}/>{previewRendered ? editorStatus.renderOutdated ? "Render lama" : "Hasil render" : "Sumber"}</button>}<button type="button" className="preview-toggle preview-collapse-toggle" aria-expanded={!previewCollapsed} aria-label={previewCollapsed ? "Expand live preview" : "Collapse live preview"} title={previewCollapsed ? "Expand live preview" : "Collapse live preview"} onClick={() => setPreviewCollapsed((value) => !value)}><ChevronDown size={13}/></button><span className="local-only-pill"><LockKeyhole size={12}/> LOCAL</span></div></div>
+          <div className="clip-preview-grid"><div ref={previewStageRef} className={`portrait-stage clip-composition-stage ${activePreviewTransition?.type === "dip_to_black" ? "preview-dip-black" : ""}`}><video key={`${videoUrl}-${previewRendered}`} ref={previewRef} src={videoUrl} muted={previewMuted ?? edit.audio.muted} playsInline preload="metadata" style={{ objectFit: "cover", objectPosition: `${edit.crop_x}% ${edit.crop_y}%`, opacity: activePreviewTransition ? transitionOpacity.from : 1 }} onLoadedMetadata={onPreviewLoaded} onError={() => setPreviewUnavailable(true)} onTimeUpdate={onPreviewTimeUpdate} onPlay={() => setPreviewPlaying(true)}/><video ref={transitionPreviewRef} className="clip-transition-preview" src={videoUrl} muted={previewMuted ?? (activePreviewTransition ? edit.audio.muted : true)} playsInline preload="metadata" aria-hidden="true" style={{ objectFit: "cover", objectPosition: `${edit.crop_x}% ${edit.crop_y}%`, opacity: transitionOpacity.to, visibility: activePreviewTransition ? "visible" : "hidden" }}/>{edit.title_overlay.enabled && !previewRendered && compositionTime < edit.title_overlay.duration && <div className="preview-title-overlay" style={{ top: `${edit.title_overlay.position}%`, color: edit.title_overlay.color, fontFamily: edit.title_overlay.font, fontSize: `${Math.max(12, edit.title_overlay.size / 3)}px` }}>{edit.title_overlay.text}</div>}{edit.subtitle_enabled && !previewRendered && activeSubtitle && <div className={`preview-caption style-${edit.style.toLowerCase()} ${captionAnimationClass}`} style={captionStyle}>{previewCaption}</div>}{previewUnavailable && <div className="preview-media-unavailable" role="status">Preview tidak tersedia. Draft tetap utuh; periksa file sumber atau MP4 hasil render.</div>}<div className="preview-fullscreen-controls"><button type="button" className="preview-control-icon" aria-label={previewPlaying ? "Pause preview" : "Play preview"} onClick={togglePlayback}>{previewPlaying ? <Pause size={16}/> : <Play size={16}/>}</button><button type="button" className="preview-control-icon" aria-label={(previewMuted ?? edit.audio.muted) ? "Unmute preview" : "Mute preview"} onClick={() => setPreviewMuted(!(previewMuted ?? edit.audio.muted))}>{(previewMuted ?? edit.audio.muted) ? <VolumeX size={16}/> : <Volume2 size={16}/>}</button><button type="button" className="preview-control-icon" aria-label="Exit fullscreen preview" onClick={() => void togglePreviewFullscreen()}><Minimize2 size={16}/></button></div><div className="preview-fullscreen-seek"><input aria-label="Fullscreen output seek" type="range" min="0" max={Math.max(timelineDuration, 0.01)} step="0.01" value={Math.min(compositionTime, timelineDuration)} onChange={(event) => seekOutput(Number(event.target.value))}/><span>{formatDuration(compositionTime)} / {formatDuration(timelineDuration)}</span></div><span className="preview-frame-label"><Film size={12}/> {previewRendered ? "RENDERED MP4" : "LIVE SOURCE PREVIEW"}</span></div>
          <div className="clip-preview-controls"><div className="preview-transport"><button className="button button-outline" type="button" onClick={togglePlayback}>{previewPlaying ? <Pause size={14}/> : <Play size={14}/>} {previewPlaying ? "Pause" : "Play"}</button><button className="button button-outline" type="button" onClick={() => { seekOutput(0); if (previewRef.current) void previewRef.current.play().catch(() => {}); }}>Ulangi</button><button type="button" className="icon-button preview-control-icon" aria-label={(previewMuted ?? edit.audio.muted) ? "Unmute preview" : "Mute preview"} title={(previewMuted ?? edit.audio.muted) ? "Unmute preview" : "Mute preview"} onClick={() => setPreviewMuted(!(previewMuted ?? edit.audio.muted))}>{(previewMuted ?? edit.audio.muted) ? <VolumeX size={14}/> : <Volume2 size={14}/>}</button><button type="button" className="icon-button preview-control-icon" aria-label={previewFullscreen ? "Exit fullscreen preview" : "Fullscreen preview"} title={previewFullscreen ? "Exit fullscreen" : "Fullscreen"} onClick={() => void togglePreviewFullscreen()}>{previewFullscreen ? <Minimize2 size={14}/> : <Maximize2 size={14}/>}</button><span>{formatDuration(compositionTime)} / {formatDuration(timelineDuration)}</span></div><input aria-label="Scrubber komposisi output" type="range" min="0" max={Math.max(timelineDuration, 0.01)} step="0.01" value={Math.min(compositionTime, timelineDuration)} onChange={(event) => seekOutput(Number(event.target.value))}/><p>Preview browser melompat antar rentang sumber; render final memakai FFmpeg. {previewRendered && editorStatus.renderOutdated ? "MP4 yang ditampilkan belum mencakup edit terbaru." : ""}</p></div></div>
      </section>
       <div className={`editor-layout-legacy ${edit.scene_mode}`}>
 
 
-      <div className={`editor-tools ${running || subtitleBusy || subtitleSaving ? "tools-disabled" : ""}`} aria-disabled={running || subtitleBusy || subtitleSaving}>
-        <details className="panel tool-panel" open><summary className="tool-heading"><span className="tool-icon"><Scissors size={15}/></span><div><strong>Trim klip</strong><small>Batasi potongan di dalam kandidat</small></div><ChevronDown size={14}/></summary><div className="trim-track"><div className="trim-fill"/><i/><i/></div><div className="trim-fields"><label><span>Awal klip</span><div><input type="number" min="0" max={edit.trim_end - 1} step="0.1" value={edit.trim_start} onChange={(event) => update("trim_start", Number(event.target.value))}/><small>detik</small></div></label><span className="trim-separator">—</span><label><span>Akhir klip</span><div><input type="number" min={edit.trim_start + 0.1} max={length} step="0.1" value={edit.trim_end} onChange={(event) => update("trim_end", Number(event.target.value))}/><small>detik</small></div></label></div><div className="trim-boundaries"><span>{formatDuration(data.clip.start + edit.trim_start)} sumber</span><span>{formatDuration(data.clip.start + edit.trim_end)} sumber</span></div></details>
+      <div className={`editor-tools ${running || subtitleBusy || saveRequestBusy ? "tools-disabled" : ""}`} aria-disabled={running || subtitleBusy || saveRequestBusy}>
+        <details className="panel tool-panel" open><summary className="tool-heading"><span className="tool-icon"><Scissors size={15}/></span><div><strong>Trim klip</strong><small>Batasi potongan di dalam kandidat</small></div><ChevronDown size={14}/></summary><div className="trim-track"><div className="trim-fill"/><i/><i/></div><div className="trim-fields"><label><span>Awal klip</span><div><input type="number" min="0" max={edit.trim_end - 1} step="0.001" value={formatTimeInput(edit.trim_start)} onChange={(event) => update("trim_start", Number(event.target.value))}/><small>detik</small></div></label><span className="trim-separator">—</span><label><span>Akhir klip</span><div><input type="number" min={edit.trim_start + 0.1} max={length} step="0.001" value={formatTimeInput(edit.trim_end)} onChange={(event) => update("trim_end", Number(event.target.value))}/><small>detik</small></div></label></div><div className="trim-boundaries"><span>{formatDuration(data.clip.start + edit.trim_start)} sumber</span><span>{formatDuration(data.clip.start + edit.trim_end)} sumber</span></div></details>
 
-        <details className="panel tool-panel" open><summary className="tool-heading"><span className="tool-icon purple"><Settings2 size={15}/></span><div><strong>Crop & fokus</strong><small>Posisi sumber dalam frame 9:16</small></div><ChevronDown size={14}/></summary><div className="range-control"><div><label>Horizontal</label><span>{edit.crop_x === 50 ? "Center" : `${edit.crop_x}%`}</span></div><input aria-label="Posisi crop horizontal" type="range" min="0" max="100" value={edit.crop_x} onChange={(event) => update("crop_x", Number(event.target.value))}/><div className="range-labels"><span>Kiri</span><span>Tengah</span><span>Kanan</span></div></div><div className="range-control"><div><label>Vertikal</label><span>{edit.crop_y === 50 ? "Center" : `${edit.crop_y}%`}</span></div><input aria-label="Posisi crop vertikal" type="range" min="0" max="100" value={edit.crop_y} onChange={(event) => update("crop_y", Number(event.target.value))}/><div className="range-labels"><span>Atas</span><span>Tengah</span><span>Bawah</span></div></div><div className="field compact-field"><span>Resolusi output</span><select value={edit.resolution} onChange={(event) => update("resolution", event.target.value as Edit["resolution"])}><option value="720">720 × 1280</option><option value="1080">1080 × 1920</option></select></div></details>
+        <details className="panel tool-panel clip-export-merged-panel"><summary className="tool-heading"><span className="tool-icon purple"><Settings2 size={15}/></span><div><strong>Crop, audio & export</strong><small>Frame 9:16 · suara, judul & kualitas hasil</small></div><ChevronDown size={14}/></summary><div className="range-control"><div><label>Horizontal</label><span>{edit.crop_x === 50 ? "Center" : `${edit.crop_x}%`}</span></div><input aria-label="Posisi crop horizontal" type="range" min="0" max="100" value={edit.crop_x} onChange={(event) => update("crop_x", Number(event.target.value))}/><div className="range-labels"><span>Kiri</span><span>Tengah</span><span>Kanan</span></div></div><div className="range-control"><div><label>Vertikal</label><span>{edit.crop_y === 50 ? "Center" : `${edit.crop_y}%`}</span></div><input aria-label="Posisi crop vertikal" type="range" min="0" max="100" value={edit.crop_y} onChange={(event) => update("crop_y", Number(event.target.value))}/><div className="range-labels"><span>Atas</span><span>Tengah</span><span>Bawah</span></div></div>
+          <div className="clip-export-sections">
+            <section className="clip-export-section" aria-labelledby="clip-export-output-heading">
+              <h3 id="clip-export-output-heading">Output</h3>
+              <div className="clip-export-fields clip-export-fields-output">
+                <label>Resolusi output<select value={edit.resolution} onChange={(event) => update("resolution", event.target.value as Edit["resolution"])}><option value="720">720 × 1280</option><option value="1080">1080 × 1920</option></select></label><label>FPS<select value={edit.fps} onChange={(event) => update("fps", Number(event.target.value) as Edit["fps"])}><option value={30}>30 FPS</option><option value={60}>60 FPS</option></select></label><label>Kualitas<select value={edit.quality} onChange={(event) => update("quality", event.target.value as Edit["quality"])}><option value="smaller">Smaller File</option><option value="balanced">Balanced</option><option value="high">High Quality</option></select></label>
+              </div>
+            </section>
+            <section className="clip-export-section" aria-labelledby="clip-export-audio-heading">
+              <h3 id="clip-export-audio-heading">Audio</h3>
+              <div className="clip-export-fields clip-export-fields-audio">
+                <label>Audio volume<div className="clip-export-range-value"><input type="range" min="0" max="2" step="0.05" value={edit.audio.volume} onChange={(event) => applyEdit((current) => ({ ...current, audio: { ...current.audio, volume: Number(event.target.value) } }))}/><span>{Math.round(edit.audio.volume * 100)}%</span></div></label><label>Fade in (s)<input type="number" min="0" max="10" step="0.001" value={formatTimeInput(edit.audio.fade_in)} onChange={(event) => applyEdit((current) => ({ ...current, audio: { ...current.audio, fade_in: Number(event.target.value) } }))}/></label><label>Fade out (s)<input type="number" min="0" max="10" step="0.001" value={formatTimeInput(edit.audio.fade_out)} onChange={(event) => applyEdit((current) => ({ ...current, audio: { ...current.audio, fade_out: Number(event.target.value) } }))}/></label><label>Target loudness (LUFS)<input type="number" min="-24" max="-14" step="1" value={edit.audio.target_lufs} onChange={(event) => applyEdit((current) => ({ ...current, audio: { ...current.audio, target_lufs: Number(event.target.value) } }))}/></label>
+              </div>
+              <div className="clip-export-toggles"><label className="clip-checkbox"><input type="checkbox" checked={edit.audio.muted} onChange={(event) => applyEdit((current) => ({ ...current, audio: { ...current.audio, muted: event.target.checked } }))}/>{edit.audio.muted ? <VolumeX size={14}/> : <Volume2 size={14}/>} Mute</label><label className="clip-checkbox"><input type="checkbox" checked={edit.audio.normalize} onChange={(event) => applyEdit((current) => ({ ...current, audio: { ...current.audio, normalize: event.target.checked } }))}/> Normalize audio</label><label className="clip-checkbox"><input type="checkbox" checked={edit.audio.limiter} onChange={(event) => applyEdit((current) => ({ ...current, audio: { ...current.audio, limiter: event.target.checked } }))}/> Peak limiter</label></div>
+            </section>
+            <section className="clip-export-section" aria-labelledby="clip-export-title-heading">
+              <div className="clip-export-section-heading"><h3 id="clip-export-title-heading">Judul &amp; overlay</h3><label className="clip-checkbox"><input type="checkbox" checked={edit.title_overlay.enabled} onChange={(event) => applyEdit((current) => ({ ...current, title_overlay: { ...current.title_overlay, enabled: event.target.checked } }))}/> Title overlay</label></div>
+              <div className="clip-export-fields clip-export-fields-title">
+                <label>Judul<input maxLength={120} value={edit.title_overlay.text} onChange={(event) => applyEdit((current) => ({ ...current, title_overlay: { ...current.title_overlay, text: event.target.value } }))}/></label><label>Font<select value={edit.title_overlay.font} onChange={(event) => applyEdit((current) => ({ ...current, title_overlay: { ...current.title_overlay, font: event.target.value as TitleOverlay["font"] } }))}><option>Arial</option><option>Georgia</option><option>Segoe UI</option><option>Tahoma</option><option>Trebuchet MS</option><option>Times New Roman</option></select></label><label>Ukuran judul<input type="number" min="20" max="120" value={edit.title_overlay.size} onChange={(event) => applyEdit((current) => ({ ...current, title_overlay: { ...current.title_overlay, size: Number(event.target.value) } }))}/></label><label>Warna judul<input type="color" value={edit.title_overlay.color} onChange={(event) => applyEdit((current) => ({ ...current, title_overlay: { ...current.title_overlay, color: event.target.value } }))}/></label><label>Posisi vertikal<input type="range" min="10" max="90" value={edit.title_overlay.position} onChange={(event) => applyEdit((current) => ({ ...current, title_overlay: { ...current.title_overlay, position: Number(event.target.value) } }))}/></label><label>Durasi judul (s)<input type="number" min="0.5" max="15" step="0.001" value={formatTimeInput(edit.title_overlay.duration)} onChange={(event) => applyEdit((current) => ({ ...current, title_overlay: { ...current.title_overlay, duration: Number(event.target.value) } }))}/></label><label>Fade in judul (s)<input type="number" min="0" max="2" step="0.001" value={formatTimeInput(edit.title_overlay.fade_in)} onChange={(event) => applyEdit((current) => ({ ...current, title_overlay: { ...current.title_overlay, fade_in: Number(event.target.value) } }))}/></label><label>Fade out judul (s)<input type="number" min="0" max="2" step="0.001" value={formatTimeInput(edit.title_overlay.fade_out)} onChange={(event) => applyEdit((current) => ({ ...current, title_overlay: { ...current.title_overlay, fade_out: Number(event.target.value) } }))}/></label>
+              </div>
+            </section>
+          </div>
+        </details>
 
          <details className="panel tool-panel subtitle-tool" open>
            <summary className="tool-heading"><span className="tool-icon amber-tool"><Type size={15}/></span><div><strong>Subtitle & translation</strong><small>{visibleSegments.length} cues · {edit.subtitle_timebase === "output" ? "output time" : edit.subtitle_timebase === "source" ? "source time" : "clip time"}</small></div><ChevronDown size={14}/></summary>
@@ -1197,15 +1436,15 @@ export default function ClipEditorPage() {
                 const storedSegment = edit.subtitle_segments.find((item) => item.id === segment.id) || segment;
                 return <div key={segment.id} className={`subtitle-segment-row ${subtitleSelectedIds.includes(segment.id) ? "selected" : ""}`}>
                 <div className="subtitle-segment-toolbar"><label><input type="checkbox" checked={subtitleSelectedIds.includes(segment.id)} onChange={(event) => setSubtitleSelectedIds((current) => event.target.checked ? [...current, segment.id] : current.filter((id) => id !== segment.id))}/> Cue {segment.index + 1}</label><button type="button" className="icon-button" title="Seek to cue" onClick={() => seekSubtitleSegment(segment)}><Play size={12}/></button><button type="button" className="icon-button" title="Split cue" onClick={() => splitSubtitleSegment(segment.id)}><Scissors size={12}/></button><button type="button" className="icon-button" title="Duplicate cue" onClick={() => duplicateSubtitleSegment(segment.id)}><Copy size={12}/></button><button type="button" className="icon-button subtitle-delete-button" aria-label="Delete subtitle cue" onClick={() => deleteSubtitleSegment(segment.id)} disabled={running}><Trash2 size={13}/></button></div>
-                <div className="subtitle-timing-fields"><label><span>Start · {edit.subtitle_timebase}</span><input type="number" min="0" max={(edit.subtitle_timebase === "source" ? data.source.duration : edit.subtitle_timebase === "output" ? timelineDuration : length) - minSubtitleDuration} step="0.01" value={Number((edit.subtitle_timebase === "output" || edit.subtitle_timebase === "source" ? segment.start : segment.start - sourceStart).toFixed(2))} onChange={(event) => updateSubtitleSegment(segment.id, "start", Number(event.target.value))}/></label><label><span>End · seconds</span><input type="number" min={minSubtitleDuration} max={edit.subtitle_timebase === "source" ? data.source.duration : edit.subtitle_timebase === "output" ? timelineDuration : length} step="0.01" value={Number((edit.subtitle_timebase === "output" || edit.subtitle_timebase === "source" ? segment.end : segment.end - sourceStart).toFixed(2))} onChange={(event) => updateSubtitleSegment(segment.id, "end", Number(event.target.value))}/></label></div>
+                <div className="subtitle-timing-fields"><label><span>Start · {edit.subtitle_timebase}</span><input type="number" min="0" max={(edit.subtitle_timebase === "source" ? data.source.duration : edit.subtitle_timebase === "output" ? timelineDuration : length) - minSubtitleDuration} step="0.001" value={formatTimeInput(edit.subtitle_timebase === "output" || edit.subtitle_timebase === "source" ? segment.start : segment.start - sourceStart)} onChange={(event) => updateSubtitleSegment(segment.id, "start", Number(event.target.value))}/></label><label><span>End · seconds</span><input type="number" min={minSubtitleDuration} max={edit.subtitle_timebase === "source" ? data.source.duration : edit.subtitle_timebase === "output" ? timelineDuration : length} step="0.001" value={formatTimeInput(edit.subtitle_timebase === "output" || edit.subtitle_timebase === "source" ? segment.end : segment.end - sourceStart)} onChange={(event) => updateSubtitleSegment(segment.id, "end", Number(event.target.value))}/></label></div>
                 <textarea maxLength={500} value={segment.text} onChange={(event) => updateSubtitleSegment(segment.id, "text", event.target.value)} aria-label={`Subtitle text at ${formatDuration(segment.start)}`} disabled={running}/>
                 {storedSegment.words?.length ? <div className="subtitle-word-editor">
                    <div className="subtitle-word-editor-heading"><small>{storedSegment.words.length} words · {storedSegment.word_alignment_reviewed !== true ? "needs review" : validWordAlignment(storedSegment) ? "timing valid" : "alignment invalid"}</small><button type="button" className="button button-outline" onClick={() => addManualWord(segment.id)}>Add word</button></div>
                   {storedSegment.words.map((word, index) => <div className="subtitle-word-row" key={word.id}>
                     <button type="button" className="icon-button" title="Seek to word" aria-label={`Seek to word ${word.text || index + 1}`} onClick={() => seekSubtitleWord(word)} disabled={word.start == null}><Play size={11}/></button>
                     <input aria-label={`Word ${index + 1} text`} value={word.text} maxLength={500} onChange={(event) => updateManualWord(segment.id, word.id, "text", event.target.value)}/>
-                    <input type="number" aria-label={`Word ${index + 1} start time`} min="0" step="0.01" value={word.start ?? ""} onChange={(event) => updateManualWord(segment.id, word.id, "start", event.target.value)}/>
-                    <input type="number" aria-label={`Word ${index + 1} end time`} min="0" step="0.01" value={word.end ?? ""} onChange={(event) => updateManualWord(segment.id, word.id, "end", event.target.value)}/>
+                    <input type="number" aria-label={`Word ${index + 1} start time`} min="0" step="0.001" value={formatTimeInput(word.start ?? NaN)} onChange={(event) => updateManualWord(segment.id, word.id, "start", event.target.value)}/>
+                    <input type="number" aria-label={`Word ${index + 1} end time`} min="0" step="0.001" value={formatTimeInput(word.end ?? NaN)} onChange={(event) => updateManualWord(segment.id, word.id, "end", event.target.value)}/>
                     <button type="button" className="icon-button" title="Split word" aria-label={`Split word ${word.text || index + 1}`} onClick={() => splitManualWord(segment.id, word.id)} disabled={!word.text.trim().includes(" ")}><Scissors size={11}/></button>
                     <button type="button" className="icon-button" title="Merge with next word" aria-label={`Merge word ${index + 1} with next`} onClick={() => mergeManualWord(segment.id, word.id)} disabled={index >= storedSegment.words!.length - 1}><Copy size={11}/></button>
                     <button type="button" className="icon-button subtitle-delete-button" aria-label={`Delete word ${word.text || index + 1}`} onClick={() => removeManualWord(segment.id, word.id)}><Trash2 size={11}/></button>
@@ -1217,15 +1456,12 @@ export default function ClipEditorPage() {
            </div>
          </details>
 
-          <details className={`panel clip-export-panel ${running || subtitleBusy || subtitleSaving ? "clip-edit-disabled" : ""}`} open><summary className="tool-heading"><span className="tool-icon purple"><Settings2 size={15}/></span><div><strong>Audio, judul & export</strong><small>Audio original default; enhancement opt-in</small></div><ChevronDown size={14}/></summary>
-       <div className="clip-export-grid"><label>Resolusi<select value={edit.resolution} onChange={(event) => update("resolution", event.target.value as Edit["resolution"])}><option value="720">720 × 1280</option><option value="1080">1080 × 1920</option></select></label><label>FPS<select value={edit.fps} onChange={(event) => update("fps", Number(event.target.value) as Edit["fps"])}><option value={30}>30 FPS</option><option value={60}>60 FPS</option></select></label><label>Kualitas<select value={edit.quality} onChange={(event) => update("quality", event.target.value as Edit["quality"])}><option value="smaller">Smaller File</option><option value="balanced">Balanced</option><option value="high">High Quality</option></select></label><label>Audio volume<input type="range" min="0" max="2" step="0.05" value={edit.audio.volume} onChange={(event) => applyEdit((current) => ({ ...current, audio: { ...current.audio, volume: Number(event.target.value) } }))}/><span>{Math.round(edit.audio.volume * 100)}%</span></label><label>Fade in (s)<input type="number" min="0" max="10" step="0.1" value={edit.audio.fade_in} onChange={(event) => applyEdit((current) => ({ ...current, audio: { ...current.audio, fade_in: Number(event.target.value) } }))}/></label><label>Fade out (s)<input type="number" min="0" max="10" step="0.1" value={edit.audio.fade_out} onChange={(event) => applyEdit((current) => ({ ...current, audio: { ...current.audio, fade_out: Number(event.target.value) } }))}/></label><label className="clip-checkbox"><input type="checkbox" checked={edit.audio.muted} onChange={(event) => applyEdit((current) => ({ ...current, audio: { ...current.audio, muted: event.target.checked } }))}/>{edit.audio.muted ? <VolumeX size={14}/> : <Volume2 size={14}/>} Mute</label><label className="clip-checkbox"><input type="checkbox" checked={edit.audio.normalize} onChange={(event) => applyEdit((current) => ({ ...current, audio: { ...current.audio, normalize: event.target.checked } }))}/> Normalize audio</label><label className="clip-checkbox"><input type="checkbox" checked={edit.audio.limiter} onChange={(event) => applyEdit((current) => ({ ...current, audio: { ...current.audio, limiter: event.target.checked } }))}/> Peak limiter</label>
-         <label className="clip-checkbox"><input type="checkbox" checked={edit.title_overlay.enabled} onChange={(event) => applyEdit((current) => ({ ...current, title_overlay: { ...current.title_overlay, enabled: event.target.checked } }))}/> Title overlay</label><label>Judul<input maxLength={120} value={edit.title_overlay.text} onChange={(event) => applyEdit((current) => ({ ...current, title_overlay: { ...current.title_overlay, text: event.target.value } }))}/></label><label>Font<select value={edit.title_overlay.font} onChange={(event) => applyEdit((current) => ({ ...current, title_overlay: { ...current.title_overlay, font: event.target.value as TitleOverlay["font"] } }))}><option>Arial</option><option>Georgia</option><option>Segoe UI</option><option>Tahoma</option><option>Trebuchet MS</option><option>Times New Roman</option></select></label><label>Ukuran judul<input type="number" min="20" max="120" value={edit.title_overlay.size} onChange={(event) => applyEdit((current) => ({ ...current, title_overlay: { ...current.title_overlay, size: Number(event.target.value) } }))}/></label><label>Warna judul<input type="color" value={edit.title_overlay.color} onChange={(event) => applyEdit((current) => ({ ...current, title_overlay: { ...current.title_overlay, color: event.target.value } }))}/></label><label>Posisi vertikal<input type="range" min="10" max="90" value={edit.title_overlay.position} onChange={(event) => applyEdit((current) => ({ ...current, title_overlay: { ...current.title_overlay, position: Number(event.target.value) } }))}/></label><label>Durasi judul (s)<input type="number" min="0.5" max="15" step="0.1" value={edit.title_overlay.duration} onChange={(event) => applyEdit((current) => ({ ...current, title_overlay: { ...current.title_overlay, duration: Number(event.target.value) } }))}/></label><label>Fade in judul (s)<input type="number" min="0" max="2" step="0.1" value={edit.title_overlay.fade_in} onChange={(event) => applyEdit((current) => ({ ...current, title_overlay: { ...current.title_overlay, fade_in: Number(event.target.value) } }))}/></label><label>Fade out judul (s)<input type="number" min="0" max="2" step="0.1" value={edit.title_overlay.fade_out} onChange={(event) => applyEdit((current) => ({ ...current, title_overlay: { ...current.title_overlay, fade_out: Number(event.target.value) } }))}/></label><label>Target loudness (LUFS)<input type="number" min="-24" max="-14" step="1" value={edit.audio.target_lufs} onChange={(event) => applyEdit((current) => ({ ...current, audio: { ...current.audio, target_lufs: Number(event.target.value) } }))}/></label></div>
-     </details>
+
         </div>
       </div>
       </div>
-      <section className={`panel clip-timeline-panel ${timelineCollapsed ? "timeline-collapsed" : ""} ${running || subtitleBusy || subtitleSaving ? "clip-edit-disabled" : ""}`} onPointerMove={moveTimelinePointer} onPointerUp={endTimelinePointer} onPointerCancel={endTimelinePointer}>
-       <div className="clip-timeline-heading"><div><strong>Timeline output</strong><span>{compositionScenes.length} scene · {formatDuration(timelineDuration)} total · source time terpisah dari output time</span></div><div className="clip-history-actions"><button type="button" className="button button-outline" aria-expanded={!timelineCollapsed} aria-label={timelineCollapsed ? "Expand timeline" : "Collapse timeline"} onClick={() => setTimelineCollapsed((value) => !value)}><ChevronDown size={13}/>{timelineCollapsed ? "Expand Timeline" : "Collapse Timeline"}</button><button type="button" className="button button-outline" onClick={undo} disabled={!canUndo || running} title="Undo · Ctrl+Z"><Undo2 size={13}/> Undo</button><button type="button" className="button button-outline" onClick={redo} disabled={!canRedo || running} title="Redo · Ctrl+Y"><Redo2 size={13}/> Redo</button><label>Zoom <input aria-label="Zoom timeline" type="range" min="12" max="80" value={sceneZoom} onChange={(event) => setSceneZoom(Number(event.target.value))}/></label><span className="clip-autosave-state">{editorStatus.draft === "saving" ? "Menyimpan draft…" : editorStatus.draft === "failed" ? "Save gagal" : editorStatus.draft === "unsaved" ? "Autosave tertunda" : "Draft tersimpan"}</span></div></div>
+      <section className={`panel clip-timeline-panel ${timelineCollapsed ? "timeline-collapsed" : ""} ${running || subtitleBusy || saveRequestBusy ? "clip-edit-disabled" : ""}`} onPointerMove={moveTimelinePointer} onPointerUp={endTimelinePointer} onPointerCancel={endTimelinePointer}>
+        <div className="clip-timeline-heading"><div><strong>Timeline output</strong><span>{compositionScenes.length} scene · {activeTransitionCount} transisi · {formatDuration(timelineDuration)} total</span></div><div className="clip-history-actions"><button type="button" className="button button-outline" aria-expanded={!timelineCollapsed} aria-label={timelineCollapsed ? "Expand timeline" : "Collapse timeline"} onClick={() => setTimelineCollapsed((value) => !value)}><ChevronDown size={13}/>{timelineCollapsed ? "Expand Timeline" : "Collapse Timeline"}</button><button type="button" className="button button-outline" onClick={undo} disabled={!canUndo || running} title="Undo · Ctrl+Z"><Undo2 size={13}/> Undo</button><button type="button" className="button button-outline" onClick={redo} disabled={!canRedo || running} title="Redo · Ctrl+Y"><Redo2 size={13}/> Redo</button><label>Zoom <input aria-label="Zoom timeline" type="range" min="12" max="160" value={sceneZoom} onChange={(event) => setSceneZoom(Number(event.target.value))}/></label><span className="clip-autosave-state">{editorStatus.draft === "saving" ? "Menyimpan draft…" : editorStatus.draft === "failed" ? "Save gagal" : editorStatus.draft === "unsaved" ? "Autosave tertunda" : "Draft tersimpan"}</span></div></div>
        <div className="clip-timeline-shortcuts"><span><kbd>I</kbd> Tandai Awal</span><span><kbd>O</kbd> Tandai Akhir</span><span><kbd>S</kbd> Split</span><span><kbd>Delete</kbd> Hapus Bagian</span><span><kbd>Ctrl+Z</kbd> Undo</span></div>
        <div className="clip-timeline-scroll"><div className="clip-timeline-track" ref={timelineTrackRef} style={{ width: `${timelineWidth}px` }}>
          <div className="clip-timeline-ruler" tabIndex={0} aria-label="Penggaris timeline output; drag untuk memilih Cut Range" style={{ width: `${timelineWidth}px` }} onPointerDown={beginRangeSelection}>
@@ -1233,14 +1469,24 @@ export default function ClipEditorPage() {
            {cutRange && <i className="clip-cut-selection" style={{ left: `${cutRange.start * timelineScale}px`, width: `${Math.max(2, (cutRange.end - cutRange.start) * timelineScale)}px` }}/>}<i className="clip-playhead" style={{ left: `${compositionTime * timelineScale}px` }}/>
          </div>
           <div className="clip-scene-lane">
-           {timelineScenes.map((scene, index) => <div key={scene.id} className={`clip-scene-block ${scene.id === selectedSceneId ? "selected" : ""} ${dragSceneId === scene.id ? "dragging" : ""}`} draggable={!running} style={{ left: `${(scene.timeline_start || 0) * timelineScale}px`, width: `${Math.max(2, (scene.duration || 0) * timelineScale)}px` }} onDragStart={() => setDragSceneId(scene.id)} onDragOver={(event) => event.preventDefault()} onDrop={() => handleSceneDrop(scene.id)} onDragEnd={() => setDragSceneId("")}>
-             <button type="button" className="clip-scene-select" onClick={() => { setSelectedSceneId(scene.id); seekOutput(scene.timeline_start || 0); }} aria-label={`Pilih scene ${index + 1}`}><GripVertical size={12}/><strong>{index + 1}</strong><span>{formatDuration(scene.duration || 0)}</span></button>
-             <small>{formatDuration(scene.source_start)}–{formatDuration(scene.source_end)} sumber</small>
-             <button type="button" className="clip-scene-edge left" aria-label="Trim awal scene" onPointerDown={(event) => beginSceneResize(event, scene.id, "start")}/><button type="button" className="clip-scene-edge right" aria-label="Trim akhir scene" onPointerDown={(event) => beginSceneResize(event, scene.id, "end")}/>
-           </div>)}
+            {timelineScenes.map((scene, index) => <div key={scene.id} className={`clip-scene-block ${scene.id === selectedSceneId ? "selected" : ""} ${dragSceneId === scene.id ? "dragging" : ""}`} draggable={!running} style={{ left: `${(scene.timeline_start || 0) * timelineScale}px`, width: `${Math.max(2, (scene.duration || 0) * timelineScale)}px` }} onDragStart={() => setDragSceneId(scene.id)} onDragOver={(event) => event.preventDefault()} onDrop={() => handleSceneDrop(scene.id)} onDragEnd={() => setDragSceneId("")}>
+              <button type="button" className="clip-scene-select" onClick={() => { const incoming = index ? sceneTransition(compositionScenes, index - 1, edit.transitions) : null; const afterTransition = (scene.timeline_start || 0) + (incoming && incoming.type !== "none" && transitionMode(incoming) === "overlap" ? incoming.duration : 0); setSelectedSceneId(scene.id); seekOutput(afterTransition); }} aria-label={`Pilih scene ${index + 1}`}><GripVertical size={12}/><strong>{index + 1}</strong><span>{formatDuration(scene.duration || 0)}</span></button>
+              <small>{formatDuration(scene.source_start)}–{formatDuration(scene.source_end)} sumber</small>
+              <button type="button" className="clip-scene-edge left" aria-label="Trim awal scene" onPointerDown={(event) => beginSceneResize(event, scene.id, "start")}/><button type="button" className="clip-scene-edge right" aria-label="Trim akhir scene" onPointerDown={(event) => beginSceneResize(event, scene.id, "end")}/>
+            </div>)}
+            {edit.scene_mode === "multi" && transitionBoundaries.map(({ from, index, key, transition }) => {
+              const active = transition.type !== "none";
+              const left = active ? from.transition_start || 0 : from.timeline_end || 0;
+              const duration = from.transition_duration ?? transition.duration;
+              const width = active ? duration * timelineScale : 24;
+              const label = `${transitionMode(transition) === "insert_slot" ? "Insert Slot" : "Overlap"} · ${transitionLabels[transition.type]} · ${formatTimeInput(duration)}s`;
+              return <button key={key} type="button" className={`clip-transition-slot ${active ? "active" : "add"} ${transitionMode(transition) === "insert_slot" ? "insert" : "overlap"} ${transitionPanelKey === key ? "selected" : ""}`} style={{ left: `${left * timelineScale}px`, width: `${width}px`, transform: active ? undefined : "translate(-50%,-50%)" }} aria-expanded={transitionPanelKey === key} aria-controls={transitionPanelKey === key ? "scene-transition-settings" : undefined} aria-label={active ? `Edit transisi scene ${index + 1} ke ${index + 2}: ${label}` : `Tambah transisi antara scene ${index + 1} dan ${index + 2}`} title={active ? label : `Tambah transisi ${index + 1} → ${index + 2} · default Insert Slot 0.5s`} onClick={() => { setSelectedSceneId(from.id); setTransitionPanelKey(key); }}>
+                {active ? <><Sparkles size={12}/>{width >= 58 && <span>{formatTimeInput(duration)}s</span>}</> : <Plus size={14}/>}
+              </button>;
+            })}
             {cutRange && <i className="clip-cut-selection clip-cut-lane" style={{ left: `${cutRange.start * timelineScale}px`, width: `${Math.max(2, (cutRange.end - cutRange.start) * timelineScale)}px` }}/>}<i className="clip-playhead clip-playhead-lane" style={{ left: `${compositionTime * timelineScale}px`}} onPointerDown={() => {}}/>
-          </div>
-          <div className="clip-subtitle-lane" aria-label="Subtitle cue timeline">
+           </div>
+            <div className="clip-subtitle-lane" aria-label="Subtitle cue timeline">
             <span className="clip-lane-label">SUBTITLES</span>
             {timelineSubtitleSegments.map((segment) => {
               const start = subtitleDragPreview?.id === segment.id ? subtitleDragPreview.start : segment.outputStart;
@@ -1252,11 +1498,26 @@ export default function ClipEditorPage() {
             })}
           </div>
         </div></div>
-       <div className="clip-cut-controls"><div className="clip-cut-fields"><label>In · output detik<input type="number" min="0" max={timelineDuration} step="0.01" value={cutRange?.start ?? ""} placeholder="Tandai Awal" onChange={(event) => setCutRange({ start: Math.max(0, Math.min(timelineDuration, Number(event.target.value))), end: cutRange?.end ?? timelineDuration })}/></label><button type="button" className="button button-outline" onClick={markIn} disabled={running}>Tandai Awal</button><label>Out · output detik<input type="number" min="0" max={timelineDuration} step="0.01" value={cutRange?.end ?? ""} placeholder="Tandai Akhir" onChange={(event) => setCutRange({ start: cutRange?.start ?? 0, end: Math.max(0, Math.min(timelineDuration, Number(event.target.value))) })}/></label><button type="button" className="button button-outline" onClick={markOut} disabled={running}>Tandai Akhir</button><button type="button" className="button button-outline" onClick={splitAtPlayhead} disabled={running}><Scissors size={13}/> Split</button><button type="button" className="button button-danger" onClick={deleteSelectedRange} disabled={running || !validCutRange}><Trash2 size={13}/> Hapus Bagian</button></div><small>Drag di penggaris untuk memilih rentang. Ripple delete hanya mengubah komposisi; file sumber tetap utuh.</small></div>
+       <div className="clip-cut-controls"><div className="clip-cut-fields"><label>In · output detik<input type="number" min="0" max={timelineDuration} step="0.001" value={formatTimeInput(cutRange?.start ?? NaN)} placeholder="Tandai Awal" onChange={(event) => setCutRange({ start: Math.max(0, Math.min(timelineDuration, Number(event.target.value))), end: cutRange?.end ?? timelineDuration })}/></label><button type="button" className="button button-outline" onClick={markIn} disabled={running}>Tandai Awal</button><label>Out · output detik<input type="number" min="0" max={timelineDuration} step="0.001" value={formatTimeInput(cutRange?.end ?? NaN)} placeholder="Tandai Akhir" onChange={(event) => setCutRange({ start: cutRange?.start ?? 0, end: Math.max(0, Math.min(timelineDuration, Number(event.target.value))) })}/></label><button type="button" className="button button-outline" onClick={markOut} disabled={running}>Tandai Akhir</button><button type="button" className="button button-outline" onClick={splitAtPlayhead} disabled={running}><Scissors size={13}/> Split</button><button type="button" className="button button-danger" onClick={deleteSelectedRange} disabled={running || !validCutRange}><Trash2 size={13}/> Hapus Bagian</button></div><small>Drag di penggaris untuk memilih rentang. Ripple delete hanya mengubah komposisi; file sumber tetap utuh.</small></div>
        <div className="clip-scene-properties"><div className="clip-mode-switch"><span>Mode</span><button type="button" className={edit.scene_mode === "single" ? "active" : ""} onClick={() => switchSceneMode("single")}>Single Scene</button><button type="button" className={edit.scene_mode === "multi" ? "active" : ""} onClick={() => switchSceneMode("multi")}>Multi-Scene</button></div>
-          {selectedScene && <><label>Scene terpilih<select value={selectedScene.role} onChange={(event) => setSceneRole(selectedScene.id, event.target.value as Scene["role"])}><option value="hook">Hook</option><option value="body">Isi</option><option value="ending">Ending</option></select></label><label>In sumber (detik)<input type="number" min={edit.scene_mode === "single" ? sourceStart : 0} max={data.source.duration} step="0.01" value={selectedScene.source_start} onChange={(event) => updateSelectedSceneRange(Number(event.target.value), selectedScene.source_end)}/></label><label>Out sumber (detik)<input type="number" min={0} max={edit.scene_mode === "single" ? data.clip.end : data.source.duration} step="0.01" value={selectedScene.source_end} onChange={(event) => updateSelectedSceneRange(selectedScene.source_start, Number(event.target.value))}/></label><button type="button" className="button button-outline" onClick={duplicateSelectedScene} disabled={running || compositionScenes.length >= 12}><Copy size={13}/> Duplikasi</button><button type="button" className="button button-outline" onClick={deleteSelectedScene} disabled={running || compositionScenes.length <= 1}><Trash2 size={13}/> Hapus Scene</button>{selectedScene.role === "hook" && selectedScene.order !== 0 && <button type="button" className="button button-outline" onClick={() => { const moved = reorderScene(compositionScenes, selectedScene.id, compositionScenes[0].id) as Scene[]; commitEdit(toSourceTimedEdit(edit, moved)); }}>Pindahkan Hook ke awal</button>}{selectedScene.role === "ending" && (selectedScene.duration || 0) < 1.5 && <small className="clip-ending-hint">Ending pendek; periksa apakah pesan terpotong.</small>}</>}
+           {selectedScene && <><label>Scene terpilih<select value={selectedScene.role} onChange={(event) => setSceneRole(selectedScene.id, event.target.value as Scene["role"])}><option value="hook">Hook</option><option value="body">Isi</option><option value="ending">Ending</option></select></label><label>In sumber (detik)<input type="number" min={edit.scene_mode === "single" ? sourceStart : 0} max={data.source.duration} step="0.001" value={formatTimeInput(selectedScene.source_start)} onChange={(event) => updateSelectedSceneRange(Number(event.target.value), selectedScene.source_end)}/></label><label>Out sumber (detik)<input type="number" min={0} max={edit.scene_mode === "single" ? data.clip.end : data.source.duration} step="0.001" value={formatTimeInput(selectedScene.source_end)} onChange={(event) => updateSelectedSceneRange(selectedScene.source_start, Number(event.target.value))}/></label><button type="button" className="button button-outline" onClick={duplicateSelectedScene} disabled={running || compositionScenes.length >= 12} title={compositionScenes.length >= 12 ? "Batas 12 scene tercapai." : undefined}><Copy size={13}/> Duplikasi</button><button type="button" className="button button-outline" onClick={deleteSelectedScene} disabled={running || compositionScenes.length <= 1} title={compositionScenes.length <= 1 ? "Minimal 2 scene diperlukan." : undefined}><Trash2 size={13}/> Hapus Scene</button>{selectedScene.role === "hook" && selectedScene.order !== 0 && <button type="button" className="button button-outline" onClick={() => { const moved = reorderScene(compositionScenes, selectedScene.id, compositionScenes[0].id) as Scene[]; commitEdit(toSourceTimedEdit(edit, moved)); }}>Pindahkan Hook ke awal</button>}{selectedScene.role === "ending" && (selectedScene.duration || 0) < 1.5 && <small className="clip-ending-hint">Ending pendek; periksa apakah pesan terpotong.</small>}</>}
+              {activeTransitionBoundary && <div className="clip-transition-settings" id="scene-transition-settings" role="group" aria-label={`Pengaturan transisi scene ${activeTransitionBoundary.index + 1} ke ${activeTransitionBoundary.index + 2}`}>
+                <div className="clip-transition-settings-heading"><strong>Transition Slot · {activeTransitionBoundary.index + 1} → {activeTransitionBoundary.index + 2}</strong><button type="button" className="icon-button" aria-label="Tutup pengaturan transisi" onClick={() => setTransitionPanelKey("")}><X size={14}/></button></div>
+                <div className="clip-transition-scenes"><span>From Scene <strong>Scene {activeTransitionBoundary.index + 1}</strong></span><ArrowRight size={14}/><span>To Scene <strong>Scene {activeTransitionBoundary.index + 2}</strong></span></div>
+                <label className="clip-transition-type">Transition Type<select value={activeTransitionBoundary.transition.type} onChange={(event) => updateSceneTransition(activeTransitionBoundary.key, { type: event.target.value as SceneTransition["type"] })}><option value="none">None · Hard Cut</option>{Object.entries(transitionLabels).filter(([type]) => type !== "none" && type !== "zoom_blur").map(([type, label]) => <option key={type} value={type}>{label}</option>)}{activeTransitionBoundary.transition.type === "zoom_blur" && <option value="zoom_blur" disabled>Zoom Blur · legacy fallback only</option>}</select></label>
+                <label className="clip-transition-mode">Timing Mode<select value={transitionMode(activeTransitionBoundary.transition)} disabled={activeTransitionBoundary.transition.type === "none"} onChange={(event) => updateSceneTransition(activeTransitionBoundary.key, { timing_mode: event.target.value as SceneTransition["timing_mode"] })}><option value="insert_slot">Insert Slot · add duration</option><option value="overlap" disabled={activeTransitionBoundary.transition.type === "zoom_blur"}>Overlap · reduce duration</option></select></label>
+                <div className="clip-transition-duration"><label>Duration · seconds<input aria-describedby="scene-transition-duration-hint" type="number" min="0.1" max={Math.max(0.1, activeTransitionMaximum)} step={1 / edit.fps} value={formatTimeInput(quantizeTransitionDuration(activeTransitionDuration, edit.fps))} disabled={activeTransitionBoundary.transition.type === "none"} onChange={(event) => updateSceneTransition(activeTransitionBoundary.key, { duration: Number(event.target.value) })}/></label><input aria-label="Transition duration slider" type="range" min="0.1" max={Math.max(0.1, activeTransitionMaximum)} step={1 / edit.fps} value={Math.min(activeTransitionMaximum || 0.1, quantizeTransitionDuration(activeTransitionDuration, edit.fps))} disabled={activeTransitionBoundary.transition.type === "none"} onChange={(event) => updateSceneTransition(activeTransitionBoundary.key, { duration: Number(event.target.value) })}/><small id="scene-transition-duration-hint">Valid range: 0.1–{formatTimeInput(activeTransitionMaximum)}s · {transitionMode(activeTransitionBoundary.transition) === "insert_slot" ? `adds ${formatTimeInput(activeTransitionDuration)}s` : `reduces ${formatTimeInput(activeTransitionDuration)}s`}.</small></div>
+                <label className="clip-checkbox"><input type="checkbox" checked={activeTransitionBoundary.transition.smooth_audio} disabled={activeTransitionBoundary.transition.type === "none"} onChange={(event) => updateSceneTransition(activeTransitionBoundary.key, { smooth_audio: event.target.checked })}/> Smooth Audio Transition</label>
+                {activeTransitionBoundary.transition.type === "zoom_blur" && <small className="clip-transition-fallback">Legacy Zoom Blur stays Overlap; preview and FFmpeg use Crossfade.</small>}
+                <small className="clip-transition-preview-note">Browser preview approximation; FFmpeg render uses normalized frame filters.</small>
+                <button type="button" className="button button-outline clip-transition-preview-button" onClick={previewSceneTransition} disabled={running || activeTransitionBoundary.transition.type === "none"}>Preview Transition</button>
+                <button type="button" className="button button-outline clip-transition-apply-button" onClick={applyTransitionToAll} disabled={running || activeTransitionBoundary.transition.type === "none"}>Apply to All eligible</button>
+                <button type="button" className="button button-danger clip-transition-remove-button" onClick={() => removeSceneTransition(activeTransitionBoundary.key)} disabled={running || activeTransitionBoundary.transition.type === "none"}>Remove Transition</button>
+              </div>}
+             {timelineDuration > 180 && <small className="clip-scene-action-hint limit" role="status">Draft {formatDuration(timelineDuration)}. Render final aktif setelah durasi dipangkas menjadi maksimal 3:00; hapus bagian bertahap.</small>}
+            {compositionScenes.length >= 12 ? <small className="clip-scene-action-hint" role="status">Batas 12 scene tercapai. Hapus scene sebelum menambah atau menduplikasi.</small> : compositionScenes.length <= 1 ? <small className="clip-scene-action-hint" role="status">Hapus Scene aktif setelah komposisi berisi minimal 2 scene.</small> : null}
        </div>
-       <div className="clip-add-scene"><strong>Tambah rentang sumber</strong><label>In<input type="number" min="0" max={data.source.duration} step="0.01" value={newSceneRange.start} onChange={(event) => setNewSceneRange((value) => ({ ...value, start: Number(event.target.value) }))}/></label><label>Out<input type="number" min="0" max={data.source.duration} step="0.01" value={newSceneRange.end} onChange={(event) => setNewSceneRange((value) => ({ ...value, end: Number(event.target.value) }))}/></label><button type="button" className="button button-outline" onClick={addScene} disabled={running || compositionScenes.length >= 12}><Plus size={13}/> Tambah Scene</button></div>
+        <div className="clip-add-scene"><strong>Tambah rentang sumber</strong><label>In<input type="number" min="0" max={data.source.duration} step="0.001" value={formatTimeInput(newSceneRange.start)} onChange={(event) => setNewSceneRange((value) => ({ ...value, start: Number(event.target.value) }))}/></label><label>Out<input type="number" min="0" max={data.source.duration} step="0.001" value={formatTimeInput(newSceneRange.end)} onChange={(event) => setNewSceneRange((value) => ({ ...value, end: Number(event.target.value) }))}/></label><button type="button" className="button button-outline" onClick={addScene} disabled={running || compositionScenes.length >= 12} title={compositionScenes.length >= 12 ? "Batas 12 scene tercapai." : undefined}><Plus size={13}/> Tambah Scene</button></div>
      </section>
 
       {publishOpen && <div className="modal-backdrop" onClick={(event) => { if (event.target === event.currentTarget && !publishBusy) setPublishOpen(false); }}><section className="confirm-modal publishing-modal clip-publish-modal" role="dialog" aria-modal="true" aria-labelledby="youtube-publish-title" aria-describedby="youtube-publish-description">

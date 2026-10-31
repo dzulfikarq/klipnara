@@ -13,8 +13,8 @@ from .analysis import candidate_schema, parse_and_validate, parse_ranking, promp
 from .config import CLIP_DIR, SOURCE_DIR, WORK_DIR
 from .db import connect
 from .media import (
-    MediaError, executable, extract_composition_audio, map_scene_subtitles, render,
-    render_subtitle_segments, transcribe, transcribe_gemini, transcribe_openai_current,
+    MAX_OUTPUT_SECONDS, MediaError, executable, extract_composition_audio, map_scene_subtitles, output_scenes, render,
+    render_subtitle_segments, scene_output_duration, transcribe, transcribe_gemini, transcribe_openai_current,
     transcript_cache_matches, transcription_config_key,
 )
 from .mood_renderer import render_mood_video
@@ -671,6 +671,8 @@ class JobRunner:
     def _render_job(self, job, source, options, cancel):
         with connect() as conn:
             clip = dict(conn.execute("SELECT * FROM clips WHERE id=?", (job["clip_id"],)).fetchone())
+        if job["kind"] == "render" and scene_output_duration(output_scenes(clip, options["edit"])) > MAX_OUTPUT_SECONDS:
+            raise MediaError(f"Final output cannot exceed {MAX_OUTPUT_SECONDS} seconds. Shorten the timeline before rendering.")
         segments = render_subtitle_segments(
             clip, options["edit"], json.loads(source["transcript_json"] or "[]"), source["sha256"],
         )

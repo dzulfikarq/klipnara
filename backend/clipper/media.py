@@ -862,7 +862,7 @@ def render_subtitle_segments(clip, edit, transcript, source_sha256):
             raise MediaError("Word Pop needs reviewed, non-overlapping word timestamps for every caption. Add manual timings or use a word-timestamp provider.")
     if active:
         if active.get("timebase") == "output":
-            if active.get("composition_signature") != signature or active.get("composition_fingerprint") != composition_fingerprint(source_sha256, signature):
+            if active.get("composition_fingerprint") != composition_fingerprint(source_sha256, signature):
                 raise MediaError("Selected output-time subtitle track is stale after scene edits. Remap or regenerate before render.")
             segments = [dict(item, segment_id=item["id"]) for item in active.get("segments", [])]
         else:

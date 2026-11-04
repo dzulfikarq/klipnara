@@ -565,6 +565,56 @@ def run():
                 raise AssertionError("failed transition render must surface FFmpeg error")
             assert not failure_target.exists(), "failed render must remove partial MP4 output"
 
+            fractional_trim = client.patch(f"/api/clips/{second['clip_id']}", json={
+                "scene_mode": "single", "trim_start": 0.13, "trim_end": 8.87,
+                "subtitle_mode": "off", "subtitle_enabled": False, "subtitle_timebase": "clip",
+                "subtitle_segments": [], "subtitle_tracks": [],
+                "subtitle_active_track_id": None, "subtitle_active_translation_id": None,
+            })
+            assert fractional_trim.status_code == 200, fractional_trim.text
+            with patch("clipper.main.local_transcription_available", return_value=True):
+                fractional_job_response = client.post(
+                    f"/api/clips/{second['clip_id']}/subtitles/transcribe",
+                    json={"provider": "local", "language": "indonesia"},
+                )
+            assert fractional_job_response.status_code == 200, fractional_job_response.text
+            with connect() as conn:
+                fractional_job = dict(conn.execute("SELECT * FROM jobs WHERE id=?", (fractional_job_response.json()["id"],)).fetchone())
+            fractional_options = json.loads(fractional_job["options_json"])
+            assert composition_signature(fractional_options["scenes"]) != fractional_options["composition_signature"]
+            edit_during_transcription = client.patch(f"/api/clips/{second['clip_id']}", json={"subtitle_mode": "manual"})
+            assert edit_during_transcription.status_code == 409
+            with patch("clipper.jobs.extract_composition_audio", return_value=8.73), \
+                 patch("clipper.jobs.transcribe", return_value=([{"start": 0.5, "end": 1.5, "text": "Fractional trim cue."}], "id", "fixture")):
+                runner._process(fractional_job, threading.Event())
+            fractional_result = client.get(f"/api/clips/{second['clip_id']}").json()
+            fractional_track = next(track for track in fractional_result["clip"]["edit"]["subtitle_tracks"] if track["id"] == fractional_options["track_id"])
+            assert fractional_track["composition_signature"] == fractional_result["subtitle_status"]["composition_signature"]
+            assert fractional_track["id"] not in fractional_result["subtitle_status"]["stale_track_ids"]
+            fractional_edit = fractional_result["clip"]["edit"]
+            fractional_track["composition_signature"] = composition_signature(fractional_options["scenes"])
+            assert fractional_track["composition_signature"] != fractional_result["subtitle_status"]["composition_signature"]
+            stale_metadata_save = client.patch(f"/api/clips/{second['clip_id']}", json=fractional_edit)
+            assert stale_metadata_save.status_code == 200, stale_metadata_save.text
+            repaired_result = client.get(f"/api/clips/{second['clip_id']}").json()
+            repaired_track = next(track for track in repaired_result["clip"]["edit"]["subtitle_tracks"] if track["id"] == fractional_options["track_id"])
+            assert repaired_track["composition_signature"] == repaired_result["subtitle_status"]["composition_signature"]
+            assert repaired_track["id"] not in repaired_result["subtitle_status"]["stale_track_ids"]
+            repaired_edit = repaired_result["clip"]["edit"]
+            repaired_track["composition_signature"] = composition_signature(fractional_options["scenes"])
+            repaired_track["composition_fingerprint"] = "0" * 64
+            repaired_edit.update({
+                "subtitle_active_track_id": repaired_track["id"], "subtitle_active_translation_id": None,
+                "subtitle_segments": repaired_track["segments"], "subtitle_timebase": "output",
+                "subtitle_mode": "auto", "subtitle_enabled": True,
+            })
+            repaired_track["composition_signature"] = repaired_result["subtitle_status"]["composition_signature"]
+            repaired_track["composition_fingerprint"] = repaired_result["subtitle_status"]["composition_fingerprint"]
+            use_track_save = client.patch(f"/api/clips/{second['clip_id']}", json=repaired_edit)
+            assert use_track_save.status_code == 200, use_track_save.text
+            subtitle_export = client.get(f"/api/clips/{second['clip_id']}/subtitles/export", params={"format": "srt", "track_id": repaired_track["id"]})
+            assert subtitle_export.status_code == 200 and "Fractional trim cue." in subtitle_export.text
+
             print("Quick Clip API, manual/auto subtitles, audio consent/range, AI isolation, render, review, cancel/retry checks passed")
 
 

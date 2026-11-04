@@ -19,7 +19,7 @@ from .media import (
 )
 from .mood_renderer import render_mood_video
 from .providers import PromptTooLargeError, ProviderError, analyze, count_prompt_tokens, local_limits, model_for
-from .subtitles import TRANSLATION_SCHEMA, composition_signature, subtitle_content_fingerprint, validate_translation
+from .subtitles import TRANSLATION_SCHEMA, subtitle_content_fingerprint, validate_translation
 
 
 def now():
@@ -745,7 +745,7 @@ class JobRunner:
             raise MediaError("Job cancelled.")
         if len(segments) > 500:
             raise MediaError("Transcription produced over 500 subtitle cues. Shorten composition and retry.")
-        signature = composition_signature(options["scenes"])
+        signature = options["composition_signature"]
         track = {
             "id": options["track_id"], "source_type": "generated", "provider": provider,
             "model": model, "language": language or "unknown", "timebase": "output",

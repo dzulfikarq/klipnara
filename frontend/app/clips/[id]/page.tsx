@@ -241,8 +241,8 @@ export default function ClipEditorPage() {
   const activeSubtitleTrack = edit?.subtitle_tracks.find((track) => track.id === edit.subtitle_active_track_id) || null;
   const activeTranslationTrack = edit?.subtitle_tracks.find((track) => track.id === edit.subtitle_active_translation_id) || null;
   const staleActiveSubtitle = Boolean(activeSubtitleTrack?.timebase === "output" && (
-    activeSubtitleTrack.composition_signature !== sceneSignature
-    || data?.subtitle_status.stale_track_ids.includes(activeSubtitleTrack.id)
+    activeSubtitleTrack.composition_fingerprint !== data?.subtitle_status.composition_fingerprint
+    || sceneSignature !== data?.subtitle_status.composition_signature
   ));
 
   useEffect(() => {
@@ -859,29 +859,44 @@ export default function ClipEditorPage() {
       setJob({ id: result.id, kind: job.kind, provider: job.provider, status: result.status, phase: result.status, progress: null, message: "Retry masuk antrean" });
     } catch (reason) { setError((reason as Error).message); }
   };
-  const useSubtitleTrack = (track: SubtitleTrack) => {
+  const useSubtitleTrack = async (track: SubtitleTrack) => {
     const current = editRef.current;
     if (!current) return;
-    if (track.timebase === "output" && track.composition_signature !== sceneSignature) {
-      setError("Track output-time sudah stale setelah perubahan scene. Generate/import ulang untuk komposisi saat ini."); return;
+    let selectedTrack = track;
+    if (track.timebase === "output") {
+      if (sceneSignature !== data.subtitle_status.composition_signature) {
+        setError("Simpan perubahan scene dulu sebelum memakai track untuk komposisi ini."); return;
+      }
+      if (track.composition_fingerprint !== data.subtitle_status.composition_fingerprint
+        || track.composition_signature !== data.subtitle_status.composition_signature) {
+        if (!(await confirm("Timing track ini akan dipertahankan dan ditautkan ke komposisi sekarang. Lanjutkan hanya jika preview sudah cocok.", {
+          title: "Konfirmasi timing subtitle",
+          confirmLabel: "Tautkan & gunakan",
+        }))) return;
+        selectedTrack = {
+          ...track,
+          composition_signature: data.subtitle_status.composition_signature,
+          composition_fingerprint: data.subtitle_status.composition_fingerprint,
+        };
+      }
     }
     if (current.subtitle_caption_mode === "word_pop") {
-      if (track.source_type === "translation") { setError("Word Pop supports original captions only. Select an original track."); return; }
-      const offset = track.timebase === "clip" ? sourceStart : 0;
-      const currentTrackSegments = track.segments.filter((segment) => track.timebase === "output"
+      if (selectedTrack.source_type === "translation") { setError("Word Pop supports original captions only. Select an original track."); return; }
+      const offset = selectedTrack.timebase === "clip" ? sourceStart : 0;
+      const currentTrackSegments = selectedTrack.segments.filter((segment) => selectedTrack.timebase === "output"
         ? segment.start < timelineDuration && segment.end > 0
         : compositionScenes.some((scene) => segment.end + offset > scene.source_start && segment.start + offset < scene.source_end));
       if (!currentTrackSegments.length || currentTrackSegments.some((segment) => !validWordAlignment(segment))) {
         setError("Word Pop needs reviewed word timings for every visible cue. Select another track or review its alignment first."); return;
       }
     }
-    if (track.source_type === "translation") {
-      const sourceId = track.source_track_id === "legacy" ? null : track.source_track_id || null;
+    if (selectedTrack.source_type === "translation") {
+      const sourceId = selectedTrack.source_track_id === "legacy" ? null : selectedTrack.source_track_id || null;
       const original = sourceId ? current.subtitle_tracks.find((item) => item.id === sourceId) : null;
       applyEdit((value) => ({
         ...value,
         subtitle_active_track_id: sourceId,
-        subtitle_active_translation_id: track.id,
+        subtitle_active_translation_id: selectedTrack.id,
         ...(original ? { subtitle_segments: original.segments, subtitle_timebase: original.timebase } : {}),
         subtitle_display_mode: "translated",
         subtitle_enabled: true,
@@ -889,15 +904,16 @@ export default function ClipEditorPage() {
       }));
       return;
     }
-    if (!track.segments.length) { setError("Track hanya berisi transkrip teks tanpa timestamp. Buat timing manual sebelum digunakan."); return; }
+    if (!selectedTrack.segments.length) { setError("Track hanya berisi transkrip teks tanpa timestamp. Buat timing manual sebelum digunakan."); return; }
     applyEdit((value) => ({
       ...value,
-      subtitle_active_track_id: track.id,
+      subtitle_tracks: value.subtitle_tracks.map((item) => item.id === selectedTrack.id ? selectedTrack : item),
+      subtitle_active_track_id: selectedTrack.id,
       subtitle_active_translation_id: null,
       subtitle_display_mode: "original",
-      subtitle_segments: track.segments,
-      subtitle_timebase: track.timebase,
-      subtitle_mode: track.source_type === "imported" ? "import" : track.source_type === "generated" ? "auto" : "manual",
+      subtitle_segments: selectedTrack.segments,
+      subtitle_timebase: selectedTrack.timebase,
+      subtitle_mode: selectedTrack.source_type === "imported" ? "import" : selectedTrack.source_type === "generated" ? "auto" : "manual",
       subtitle_enabled: true,
     }));
     setTranslationDirty(false);
@@ -1366,7 +1382,7 @@ export default function ClipEditorPage() {
       <div className={`editor-layout-legacy ${edit.scene_mode}`}>
 
 
-      <div className={`editor-tools ${running || subtitleBusy || saveRequestBusy ? "tools-disabled" : ""}`} aria-disabled={running || subtitleBusy || saveRequestBusy}>
+      <div className={`editor-tools ${running || subtitleBusy || subtitleJobRunning || saveRequestBusy ? "tools-disabled" : ""}`} aria-disabled={running || subtitleBusy || subtitleJobRunning || saveRequestBusy}>
         <details className="panel tool-panel" open><summary className="tool-heading"><span className="tool-icon"><Scissors size={15}/></span><div><strong>Trim klip</strong><small>Batasi potongan di dalam kandidat</small></div><ChevronDown size={14}/></summary><div className="trim-track"><div className="trim-fill"/><i/><i/></div><div className="trim-fields"><label><span>Awal klip</span><div><input type="number" min="0" max={edit.trim_end - 1} step="0.001" value={formatTimeInput(edit.trim_start)} onChange={(event) => update("trim_start", Number(event.target.value))}/><small>detik</small></div></label><span className="trim-separator">—</span><label><span>Akhir klip</span><div><input type="number" min={edit.trim_start + 0.1} max={length} step="0.001" value={formatTimeInput(edit.trim_end)} onChange={(event) => update("trim_end", Number(event.target.value))}/><small>detik</small></div></label></div><div className="trim-boundaries"><span>{formatDuration(data.clip.start + edit.trim_start)} sumber</span><span>{formatDuration(data.clip.start + edit.trim_end)} sumber</span></div></details>
 
         <details className="panel tool-panel clip-export-merged-panel"><summary className="tool-heading"><span className="tool-icon purple"><Settings2 size={15}/></span><div><strong>Crop, audio & export</strong><small>Frame 9:16 · suara, judul & kualitas hasil</small></div><ChevronDown size={14}/></summary><div className="range-control"><div><label>Horizontal</label><span>{edit.crop_x === 50 ? "Center" : `${edit.crop_x}%`}</span></div><input aria-label="Posisi crop horizontal" type="range" min="0" max="100" value={edit.crop_x} onChange={(event) => update("crop_x", Number(event.target.value))}/><div className="range-labels"><span>Kiri</span><span>Tengah</span><span>Kanan</span></div></div><div className="range-control"><div><label>Vertikal</label><span>{edit.crop_y === 50 ? "Center" : `${edit.crop_y}%`}</span></div><input aria-label="Posisi crop vertikal" type="range" min="0" max="100" value={edit.crop_y} onChange={(event) => update("crop_y", Number(event.target.value))}/><div className="range-labels"><span>Atas</span><span>Tengah</span><span>Bawah</span></div></div>
@@ -1409,15 +1425,25 @@ export default function ClipEditorPage() {
            <div className="subtitle-track-list"><div className="subtitle-list-heading"><span>TRACKS · REVIEW BEFORE USE</span><span>{edit.subtitle_tracks.length}</span></div>
              {edit.subtitle_tracks.length ? edit.subtitle_tracks.map((track) => {
                 const trackStale = track.timebase === "output" && (
-                  track.composition_signature !== sceneSignature || data.subtitle_status.stale_track_ids.includes(track.id)
+                  track.composition_fingerprint !== data.subtitle_status.composition_fingerprint
+                  || sceneSignature !== data.subtitle_status.composition_signature
                 );
-               const outdated = data.subtitle_status.outdated_translation_ids.includes(track.id);
-               const selected = track.id === edit.subtitle_active_track_id || track.id === edit.subtitle_active_translation_id;
-               return <article className={`subtitle-track-card ${selected ? "selected" : ""}`} key={track.id}>
+                const outdated = data.subtitle_status.outdated_translation_ids.includes(track.id);
+                const hasTimedCues = track.segments.length > 0 && track.segments.every((segment) => Number.isFinite(segment.start) && Number.isFinite(segment.end) && segment.start < segment.end && segment.text.trim());
+                const exportDisabled = trackStale || outdated || !hasTimedCues;
+                const exportDisabledReason = trackStale ? "Reconfirm & use if timings are correct, or regenerate for current composition." : outdated ? "Translate the current subtitle cues again." : "Track has no valid timed cues to export.";
+                const selected = track.id === edit.subtitle_active_track_id || track.id === edit.subtitle_active_translation_id;
+                return <article className={`subtitle-track-card ${selected ? "selected" : ""}`} key={track.id}>
                  <div className="subtitle-track-title"><strong>{track.source_type === "translation" ? `Translation · ${track.language}` : track.source_type}</strong><span>{track.provider || "manual/import"} · {track.segments.length} timed cues{track.word_timestamps ? " · word timing" : ""}{track.speaker_identification ? " · speakers" : ""}</span></div>
-                 {trackStale && <small className="subtitle-warning">Stale composition. Re-transcribe/import for current scene order and trims.</small>}{outdated && <small className="subtitle-warning">Source cues changed. Translation is outdated.</small>}
+                  {trackStale && <small className="subtitle-warning">Composition changed. Reconfirm & use to keep these timings, or re-transcribe/import.</small>}{outdated && <small className="subtitle-warning">Source cues changed. Translation is outdated.</small>}
+                  {!hasTimedCues && <small className="subtitle-warning">No valid timed cues. Add or correct timings before export.</small>}
                  {!track.segments.length && track.transcript_text && <div className="subtitle-transcript-only"><small>Transcript text only · no timestamps. Copy text, then time cues manually.</small><pre>{track.transcript_text}</pre><button type="button" className="button button-outline" onClick={() => void navigator.clipboard.writeText(track.transcript_text || "").then(() => setSubtitleNotice("Transcript copied to clipboard.")).catch(() => setError("Clipboard unavailable; select and copy transcript text manually."))}><Copy size={12}/> Copy transcript</button></div>}
-                  <div className="subtitle-track-actions"><button type="button" className="button button-outline" onClick={() => track.source_type === "translation" ? useTranslationTrack(track.id) : useSubtitleTrack(track)} disabled={trackStale || outdated || !track.segments.length}>Use track</button><a className="button button-outline" href={`${API}/api/clips/${data.clip.id}/subtitles/export?format=srt&track_id=${encodeURIComponent(track.id)}`} download>Export SRT</a><a className="button button-outline" href={`${API}/api/clips/${data.clip.id}/subtitles/export?format=vtt&track_id=${encodeURIComponent(track.id)}`} download>VTT</a><button type="button" className="button button-outline" onClick={() => removeSubtitleTrack(track.id)} aria-label={`Remove ${track.source_type} subtitle track`}><Trash2 size={12}/> Remove</button></div>
+                   <div className="subtitle-track-actions">
+                      <button type="button" className="button button-outline" onClick={() => track.source_type === "translation" ? useTranslationTrack(track.id) : void useSubtitleTrack(track)} disabled={outdated || !track.segments.length}>{trackStale ? "Reconfirm & use" : "Use track"}</button>
+                     {exportDisabled ? <button type="button" className="button button-outline" disabled title={exportDisabledReason}>Export SRT</button> : <a className="button button-outline" href={`${API}/api/clips/${data.clip.id}/subtitles/export?format=srt&track_id=${encodeURIComponent(track.id)}`} download>Export SRT</a>}
+                     {exportDisabled ? <button type="button" className="button button-outline" disabled title={exportDisabledReason}>VTT</button> : <a className="button button-outline" href={`${API}/api/clips/${data.clip.id}/subtitles/export?format=vtt&track_id=${encodeURIComponent(track.id)}`} download>VTT</a>}
+                     <button type="button" className="button button-outline" onClick={() => removeSubtitleTrack(track.id)} aria-label={`Remove ${track.source_type} subtitle track`}><Trash2 size={12}/> Remove</button>
+                   </div>
                </article>;
              }) : <p className="empty-subtitles">No generated or imported drafts yet.</p>}
            </div>

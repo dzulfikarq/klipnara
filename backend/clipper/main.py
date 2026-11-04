@@ -1325,12 +1325,11 @@ def list_clips():
 @app.get("/api/clips/{clip_id}")
 def get_clip(clip_id: str):
     with connect() as conn:
-        clip = unpack(
-            conn.execute("SELECT c.*,CASE WHEN j.kind='batch_draft' THEN 'quick_clip' ELSE j.kind END AS origin,j.options_json AS source_job_options_json FROM clips c JOIN jobs j ON j.id=c.job_id WHERE c.id=?", (clip_id,)).fetchone(),
-            ("edit_json",),
-        )
+        clip_row = conn.execute("SELECT c.*,CASE WHEN j.kind='batch_draft' THEN 'quick_clip' ELSE j.kind END AS origin,j.options_json AS source_job_options_json FROM clips c JOIN jobs j ON j.id=c.job_id WHERE c.id=?", (clip_id,)).fetchone()
+        clip = unpack(clip_row, ("edit_json",))
         if clip is None:
             raise HTTPException(404, "Clip not found.")
+        original_edit_json = clip_row["edit_json"]
         source_job_options = json.loads(clip.pop("source_job_options_json") or "{}")
         raw_reference = source_job_options.get("youtube_reference")
         clip["youtube_reference"] = raw_reference if isinstance(raw_reference, dict) else None
@@ -1400,17 +1399,33 @@ def get_clip(clip_id: str):
     scenes = output_scenes(clip, edit)
     signature = composition_signature(scenes)
     fingerprint = composition_fingerprint(source_row["sha256"], signature)
+    repaired_track_ids = set()
     source_tracks = {track.get("id"): track.get("segments", []) for track in edit["subtitle_tracks"]}
     source_tracks["legacy"] = edit["subtitle_segments"]
     outdated_translations = []
     stale_tracks = []
     for track in edit["subtitle_tracks"]:
-        if track.get("timebase") == "output" and track.get("composition_fingerprint") != fingerprint:
-            stale_tracks.append(track["id"])
+        if track.get("timebase") == "output":
+            if track.get("composition_fingerprint") == fingerprint:
+                if track.get("composition_signature") != signature:
+                    track["composition_signature"] = signature
+                    repaired_track_ids.add(track["id"])
+            else:
+                stale_tracks.append(track["id"])
         if track.get("source_type") == "translation":
             original = source_tracks.get(track.get("source_track_id"), [])
             if translation_is_outdated(track, original):
                 outdated_translations.append(track["id"])
+    if repaired_track_ids:
+        stored_edit = json.loads(original_edit_json)
+        for track in stored_edit.get("subtitle_tracks", []):
+            if track.get("id") in repaired_track_ids:
+                track["composition_signature"] = signature
+        with connect() as conn:
+            conn.execute(
+                "UPDATE clips SET edit_json=? WHERE id=? AND edit_json=?",
+                (json.dumps(stored_edit, ensure_ascii=False), clip_id, original_edit_json),
+            )
     return {
         "clip": clip,
         "source": source,
@@ -1465,6 +1480,12 @@ def edit_clip(clip_id: str, body: ClipEdit):
             raise HTTPException(409, "Cancel pending YouTube upload before editing this clip.")
         if conn.execute("SELECT 1 FROM jobs WHERE clip_id=? AND kind='render' AND status IN ('queued','preparing','rendering')", (clip_id,)).fetchone():
             raise HTTPException(409, "Wait for the active render to finish or cancel it before editing.")
+        if conn.execute(
+            "SELECT 1 FROM jobs WHERE clip_id=? AND kind IN ('subtitle_transcribe','subtitle_translate') "
+            "AND status IN ('queued','preparing','preparing_audio','uploading','transcribing','processing_result')",
+            (clip_id,),
+        ).fetchone():
+            raise HTTPException(409, "Wait for the subtitle job to finish or cancel it before editing.")
         batch_item = conn.execute(
             "SELECT i.id,i.batch_id,i.status,i.job_id,b.status AS batch_status FROM video_batch_items i "
             "JOIN video_batches b ON b.id=i.batch_id WHERE i.clip_id=?",
@@ -1987,7 +2008,6 @@ def queue_clip_subtitle_transcription(clip_id: str, body: SubtitleTranscriptionR
         cached = next((track for track in edit.get("subtitle_tracks", [])
                        if track.get("source_type") == "generated" and track.get("provider") == body.provider
                         and track.get("model") == cached_model and track.get("language") in {body.language, "unknown", "id-ID", "en-US"}
-                        and track.get("composition_signature") == signature
                         and track.get("composition_fingerprint") == fingerprint), None)
         if cached:
             return {"cached": True, "track": cached, "duration": duration}
@@ -2028,7 +2048,7 @@ def queue_clip_subtitle_translation(clip_id: str, body: SubtitleTranslationReque
         with connect() as conn:
             source = conn.execute("SELECT sha256 FROM sources WHERE id=?", (clip["source_id"],)).fetchone()
         current_signature = composition_signature(output_scenes(clip, edit))
-        if source_track.get("composition_signature") != current_signature or source_track.get("composition_fingerprint") != composition_fingerprint(source["sha256"], current_signature):
+        if source_track.get("composition_fingerprint") != composition_fingerprint(source["sha256"], current_signature):
             raise HTTPException(409, "Selected subtitle track is stale. Regenerate or choose another track before translating.")
     source_segments = [item for item in source_segments if str(item.get("text") or "").strip()]
     if not source_segments:

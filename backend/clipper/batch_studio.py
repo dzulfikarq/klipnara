@@ -288,7 +288,7 @@ def _queue_mood(conn, item, batch):
 
 
 def _queue_clip(conn, item, batch):
-    from .subtitles import composition_signature
+    from .subtitles import composition_fingerprint, composition_signature
     from .media import MAX_OUTPUT_SECONDS, output_scenes, scene_output_duration
 
     clip = conn.execute("SELECT * FROM clips WHERE id=?", (item["clip_id"],)).fetchone()
@@ -304,9 +304,10 @@ def _queue_clip(conn, item, batch):
         raise HTTPException(422, f"Final output cannot exceed {MAX_OUTPUT_SECONDS} seconds. Shorten the timeline before rendering.")
     if edit.get("subtitle_enabled") and edit.get("subtitle_timebase") == "output":
         signature = composition_signature(scenes)
+        fingerprint = composition_fingerprint(source["sha256"], signature)
         active_id = edit.get("subtitle_active_track_id")
         active = next((track for track in edit.get("subtitle_tracks", []) if track.get("id") == active_id), None)
-        if active and active.get("composition_signature") != signature:
+        if active and active.get("composition_fingerprint") != fingerprint:
             raise HTTPException(409, "Selected output-time subtitle track is stale. Refresh it in Clip Editor.")
     fingerprint = _digest({"source_sha256": source["sha256"], "edit": edit})
     snapshot = {"source_sha256": source["sha256"], "edit": edit}

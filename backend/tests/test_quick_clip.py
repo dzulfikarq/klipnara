@@ -438,7 +438,8 @@ def run():
                  patch("clipper.media.probe", return_value={"duration": 5, "width": 720, "height": 1280, "video_codec": "h264", "audio_codec": "aac"}):
                 render("input.mp4", clip, multi_edit, [{"id": "hidden", "start": 0, "end": 2, "text": "Must remain hidden"}], uuid.uuid4().hex, threading.Event(), lambda _progress: None, has_audio=True)
             graph = multi_command[multi_command.index("-filter_complex") + 1]
-            assert "concat=n=2:v=1:a=1" in graph and "aresample=48000" in graph and "setpts=PTS-STARTPTS" in graph
+            assert "[v0][a0][v1][a1]concat=n=2:v=1:a=1[vcat][acat]" in graph
+            assert "aresample=48000" in graph and "setpts=PTS-STARTPTS" in graph
             assert multi_command[multi_command.index("-t") + 1] == "5.000"
             assert ass_caption_inputs == [[]], "title-only overlay must not burn disabled subtitles"
             Path(multi_command[-1]).unlink(missing_ok=True)

@@ -1139,7 +1139,8 @@ def render(source, clip, edit, segments, job_id, cancel, progress, has_audio=Tru
                 video_output = next_output
             audio_output = _compose_scene_audio(graph, scenes, audio_labels, "render")
         else:
-            graph.append(f"{''.join('[' + label + ']' for label in video_labels)}{''.join('[' + label + ']' for label in audio_labels)}concat=n={len(scenes)}:v=1:a=1[vcat][acat]")
+            concat_inputs = "".join(f"[{video}][{audio}]" for video, audio in zip(video_labels, audio_labels))
+            graph.append(f"{concat_inputs}concat=n={len(scenes)}:v=1:a=1[vcat][acat]")
             video_output, audio_output = "vcat", "acat"
         if audio_filters:
             graph.append(f"[{audio_output}]{','.join(audio_filters)}[aout]")

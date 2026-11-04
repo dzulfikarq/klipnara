@@ -28,7 +28,7 @@ ffmpeg -filters | findstr ass
 
 For hardware-assisted 1080p on the tested RX 570, also check `ffmpeg -encoders | findstr h264_amf`. Without it, source-clip export uses x264 fallback; 720p remains x264. Verify driver/build compatibility locally. FFmpeg build licensing matters if redistributing.
 
-V2.6 Clip Editor adds no runtime dependency or environment setting. It reuses existing FFmpeg/ffprobe, `clips.edit_json`, and the serial render queue. Multi-Scene is limited to one source, 12 scenes, 180 seconds total, and hard cuts.
+Clip Editor adds no runtime dependency or environment setting. It reuses existing FFmpeg/ffprobe, `clips.edit_json`, and the serial render queue. Multi-Scene uses one source, up to 12 scenes, and per-join transitions; Zoom Blur currently falls back to Crossfade. Drafts may exceed 180 seconds; final editor renders cap at 180 seconds.
 
 V2.8 subtitles add no package or database dependency. Local transcription reuses whisper.cpp; Gemini/OpenAI transcription and translation use existing backend keys and require separate in-app consent per request.
 

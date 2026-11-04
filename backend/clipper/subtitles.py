@@ -41,7 +41,15 @@ def stable_fingerprint(value):
 
 
 def composition_signature(scenes):
+    has_transitions = any(float(scene.get("transition_duration", 0) or 0) > 0 for scene in scenes)
+    has_frame_adjusted_scenes = any(
+        abs(float(scene.get("duration", float(scene["source_end"]) - float(scene["source_start"]))) - (float(scene["source_end"]) - float(scene["source_start"]))) > 1e-6
+        for scene in scenes
+    )
     return "|".join(
+        f"{scene['id']}:{float(scene['source_start']):.3f}:{float(scene['source_end']):.3f}"
+        f"@{float(scene.get('timeline_start', 0)):.3f}:{scene.get('transition_timing_mode', scene.get('transition_to_next', {}).get('timing_mode', 'overlap'))}"
+        f":{float(scene.get('transition_duration', 0) or 0):.6f}" if has_transitions or has_frame_adjusted_scenes else
         f"{scene['id']}:{float(scene['source_start']):.3f}:{float(scene['source_end']):.3f}"
         for scene in scenes
     )

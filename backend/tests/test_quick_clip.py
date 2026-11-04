@@ -16,11 +16,81 @@ from fastapi.testclient import TestClient
 from clipper.config import CLIP_DIR
 from clipper.db import connect
 from clipper.jobs import runner
-from clipper.main import app
-from clipper.media import render
+from clipper.main import ClipSceneTransition, app
+from clipper.media import MediaError, SCENE_TRANSITION_TYPES, map_scene_subtitles, output_scenes, render, scene_output_duration
+from clipper.subtitles import composition_signature
 
 
 def run():
+    one_scene_timeline = output_scenes({"id": "one-scene", "start": 0, "end": 24}, {
+        "scene_mode": "multi",
+        "scenes": [{"id": "solo", "source_start": 1, "source_end": 2.5, "order": 0, "role": "body"}],
+    })
+    assert len(one_scene_timeline) == 1 and one_scene_timeline[0]["timeline_end"] == 1.5
+
+    transition_scenes = [
+        {"id": "a", "source_start": 0, "source_end": 4, "order": 0, "role": "body"},
+        {"id": "b", "source_start": 10, "source_end": 14, "order": 1, "role": "body"},
+        {"id": "c", "source_start": 20, "source_end": 24, "order": 2, "role": "ending"},
+    ]
+    transition_edit = {
+        "scene_mode": "multi", "scenes": transition_scenes,
+        "transitions": {
+            "a>b": {"type": "crossfade", "duration": 0.5, "smooth_audio": True},
+            "b>c": {"type": "dip_to_black", "duration": 0.2, "smooth_audio": False},
+        },
+    }
+    transition_timeline = output_scenes({"id": "transition", "start": 0, "end": 24}, transition_edit)
+    assert [scene["timeline_start"] for scene in transition_timeline] == [0, 3.5, 7.3]
+    assert scene_output_duration(transition_timeline) == 11.3
+    subtitle_snapshot_scenes = [{key: scene[key] for key in ("id", "source_start", "source_end", "timeline_start", "transition_duration", "transition_timing_mode")} for scene in transition_timeline]
+    assert composition_signature(subtitle_snapshot_scenes) == composition_signature(transition_timeline)
+    mapped_transition_cues = map_scene_subtitles({"id": "transition", "start": 0, "end": 24}, {
+        **transition_edit, "subtitle_timebase": "source", "subtitle_segments": [
+            {"id": "before", "start": 3.6, "end": 4, "text": "Before"},
+            {"id": "after", "start": 10, "end": 10.4, "text": "After"},
+        ],
+    }, [])
+    assert [(round(item["start"], 3), round(item["end"], 3)) for item in mapped_transition_cues] == [(3.6, 3.75), (3.75, 3.9)]
+    inserted_timeline = output_scenes({"id": "inserted", "start": 0, "end": 24}, {
+        **transition_edit,
+        "scenes": transition_scenes[:2],
+        "transitions": {"a>b": {"type": "crossfade", "timing_mode": "insert_slot", "duration": 0.5, "smooth_audio": True}},
+    })
+    assert [scene["timeline_start"] for scene in inserted_timeline] == [0, 4.5]
+    assert scene_output_duration(inserted_timeline) == 8.5
+    inserted_snapshot_scenes = [{key: scene[key] for key in ("id", "source_start", "source_end", "timeline_start", "transition_duration", "transition_timing_mode")} for scene in inserted_timeline]
+    assert composition_signature(inserted_snapshot_scenes) == composition_signature(inserted_timeline)
+    frame_timeline = output_scenes({"id": "frame", "start": 0, "end": 24}, {
+        "scene_mode": "multi", "fps": 30,
+        "scenes": [
+            {"id": "a", "source_start": 0, "source_end": 4.01, "order": 0, "role": "body"},
+            {"id": "b", "source_start": 10, "source_end": 12, "order": 1, "role": "ending"},
+        ],
+        "transitions": {"a>b": {"type": "crossfade", "timing_mode": "insert_slot", "duration": 0.15}},
+    })
+    assert frame_timeline[0]["duration"] == 4 and frame_timeline[0]["transition_frames"] == 5
+    assert frame_timeline[1]["timeline_start"] == 4 + 5 / 30
+    assert map_scene_subtitles({"id": "frame", "start": 0, "end": 24}, {
+        "scene_mode": "multi", "fps": 30, "scenes": frame_timeline,
+        "transitions": {"a>b": {"type": "crossfade", "timing_mode": "insert_slot", "duration": 0.15}},
+        "subtitle_timebase": "source", "subtitle_segments": [{"id": "tail", "start": 4.005, "end": 4.01, "text": "Not rendered"}],
+    }, []) == []
+    rounded_overlap_timeline = output_scenes({"id": "rounded", "start": 0, "end": 24}, {
+        "scene_mode": "multi", "fps": 30,
+        "scenes": [
+            {"id": "a", "source_start": 0, "source_end": 4, "order": 0, "role": "body"},
+            {"id": "b", "source_start": 10, "source_end": 10 + 61 / 30, "order": 1, "role": "body"},
+            {"id": "c", "source_start": 20, "source_end": 24, "order": 2, "role": "ending"},
+        ],
+        "transitions": {
+            "a>b": {"type": "crossfade", "duration": 61 / 60},
+            "b>c": {"type": "crossfade", "duration": 61 / 60},
+        },
+    })
+    assert [scene["transition_frames"] for scene in rounded_overlap_timeline] == [31, 30, 0]
+    assert rounded_overlap_timeline[1]["transition_frames"] + rounded_overlap_timeline[0]["transition_frames"] == 61
+
     with patch("clipper.main.runner.start"):
         with TestClient(app) as client:
             silent_info = {"duration": 1500.0, "width": 1280, "height": 720, "video_codec": "h264", "audio_codec": None}
@@ -214,14 +284,81 @@ def run():
             restored_multi = client.get(f"/api/clips/{second['clip_id']}").json()["clip"]["edit"]
             assert restored_multi["scene_mode"] == "multi" and restored_multi["scenes"] == multi_saved.json()["scenes"]
             assert restored_multi["subtitle_timebase"] == "source" and restored_multi["subtitle_segments"][0]["start"] == 3
-            invalid_long_multi = client.patch(f"/api/clips/{second['clip_id']}", json={
+            full_edit = client.get(f"/api/clips/{second['clip_id']}").json()["clip"]["edit"]
+            full_edit["transitions"] = {"scene-a>scene-b": {"type": "crossfade", "duration": 0.25, "smooth_audio": True}}
+            transition_saved = client.patch(f"/api/clips/{second['clip_id']}", json=full_edit)
+            assert transition_saved.status_code == 200, transition_saved.text
+            assert transition_saved.json()["transitions"]["scene-a>scene-b"] == {"type": "crossfade", "duration": 0.25, "timing_mode": "overlap", "smooth_audio": True}
+            transition_defaults = client.patch(f"/api/clips/{second['clip_id']}", json={
+                "transitions": {"scene-a>scene-b": {"type": "dip_to_black"}},
+            })
+            assert transition_defaults.status_code == 200, transition_defaults.text
+            assert transition_defaults.json()["transitions"]["scene-a>scene-b"] == {"type": "dip_to_black", "duration": 0.25, "timing_mode": "overlap", "smooth_audio": False}
+            inserted_transition = client.patch(f"/api/clips/{second['clip_id']}", json={
+                "transitions": {"scene-a>scene-b": {"type": "crossfade", "timing_mode": "insert_slot", "smooth_audio": False}},
+            })
+            assert inserted_transition.status_code == 200, inserted_transition.text
+            assert inserted_transition.json()["transitions"]["scene-a>scene-b"]["timing_mode"] == "insert_slot"
+            assert inserted_transition.json()["transitions"]["scene-a>scene-b"]["duration"] == 0.5
+            with patch("clipper.main.local_transcription_available", return_value=True):
+                queued_subtitle = client.post(f"/api/clips/{second['clip_id']}/subtitles/transcribe", json={"provider": "local", "language": "indonesia"})
+            assert queued_subtitle.status_code == 200, queued_subtitle.text
+            with connect() as conn:
+                subtitle_job = dict(conn.execute("SELECT * FROM jobs WHERE id=?", (queued_subtitle.json()["id"],)).fetchone())
+            subtitle_options = json.loads(subtitle_job["options_json"])
+            assert composition_signature(subtitle_options["scenes"]) == subtitle_options["composition_signature"]
+            with patch("clipper.jobs.extract_composition_audio", return_value=5.5), \
+                 patch("clipper.jobs.transcribe", return_value=([{"start": 0.5, "end": 1.5, "text": "Insert Slot cue."}], "id", f"whisper|{'m' * 160}|123|456|789|987")):
+                runner._process(subtitle_job, threading.Event())
+            generated_edit = client.get(f"/api/clips/{second['clip_id']}").json()
+            generated_track = next(track for track in generated_edit["clip"]["edit"]["subtitle_tracks"] if track["id"] == subtitle_options["track_id"])
+            assert len(generated_track["model"]) > 120
+            assert generated_track["composition_signature"] == generated_edit["subtitle_status"]["composition_signature"]
+            assert generated_track["id"] not in generated_edit["subtitle_status"]["stale_track_ids"]
+            activate_generated = client.patch(f"/api/clips/{second['clip_id']}", json={
+                "subtitle_tracks": generated_edit["clip"]["edit"]["subtitle_tracks"],
+                "subtitle_active_track_id": generated_track["id"],
+                "subtitle_segments": generated_track["segments"], "subtitle_timebase": "output",
+                "subtitle_mode": "auto", "subtitle_enabled": True,
+            })
+            assert activate_generated.status_code == 200, activate_generated.text
+            subtitle_export = client.get(f"/api/clips/{second['clip_id']}/subtitles/export", params={"track_id": generated_track["id"]})
+            assert subtitle_export.status_code == 200 and "Insert Slot cue." in subtitle_export.text
+            for invalid_duration in (0.05, 2.1):
+                rejected_duration = client.patch(f"/api/clips/{second['clip_id']}", json={
+                    "transitions": {"scene-a>scene-b": {"type": "crossfade", "timing_mode": "insert_slot", "duration": invalid_duration, "smooth_audio": False}},
+                })
+                assert rejected_duration.status_code == 422
+            rejected_insert_zoom = client.patch(f"/api/clips/{second['clip_id']}", json={
+                "transitions": {"scene-a>scene-b": {"type": "zoom_blur", "timing_mode": "insert_slot", "duration": 0.5, "smooth_audio": False}},
+            })
+            assert rejected_insert_zoom.status_code == 422
+            rejected_transition = client.patch(f"/api/clips/{second['clip_id']}", json={
+                "transitions": {"scene-a>scene-b": {"type": "crossfade", "duration": 2.1, "smooth_audio": False}},
+            })
+            assert rejected_transition.status_code == 422
+            saved_transition = client.get(f"/api/clips/{second['clip_id']}").json()["clip"]["edit"]["transitions"]["scene-a>scene-b"]
+            assert saved_transition["duration"] == 0.5 and saved_transition["timing_mode"] == "insert_slot"
+            for transition_type in sorted(SCENE_TRANSITION_TYPES - {"none"}):
+                assert ClipSceneTransition(type=transition_type).type == transition_type
+                accepted_transition = client.patch(f"/api/clips/{second['clip_id']}", json={
+                    "transitions": {"scene-a>scene-b": {"type": transition_type, "timing_mode": "overlap", "duration": 0.5}},
+                })
+                assert accepted_transition.status_code == 200, accepted_transition.text
+            long_multi = client.patch(f"/api/clips/{second['clip_id']}", json={
                 "scene_mode": "multi",
                 "scenes": [
                     {"id": "long-a", "source_start": 1, "source_end": 101, "order": 0, "role": "hook"},
                     {"id": "long-b", "source_start": 102, "source_end": 183, "order": 1, "role": "ending"},
                 ],
             })
-            assert invalid_long_multi.status_code == 422
+            assert long_multi.status_code == 200, long_multi.text
+            blocked_long_render = client.post(f"/api/clips/{second['clip_id']}/render")
+            assert blocked_long_render.status_code == 422 and "180 seconds" in blocked_long_render.json()["detail"]
+            restored_multi = client.patch(f"/api/clips/{second['clip_id']}", json={
+                "scene_mode": "multi", "scenes": multi_saved.json()["scenes"],
+            })
+            assert restored_multi.status_code == 200, restored_multi.text
             invalid_many_scenes = client.patch(f"/api/clips/{second['clip_id']}", json={
                 "scene_mode": "multi",
                 "scenes": [
@@ -305,6 +442,178 @@ def run():
             assert multi_command[multi_command.index("-t") + 1] == "5.000"
             assert ass_caption_inputs == [[]], "title-only overlay must not burn disabled subtitles"
             Path(multi_command[-1]).unlink(missing_ok=True)
+
+            transition_effects = {"crossfade": "fade", "dip_to_black": "fadeblack", "zoom_blur": "fade"}
+            transition_effects.update({kind: kind for kind in SCENE_TRANSITION_TYPES if kind not in transition_effects and kind != "none"})
+            for transition_type, effect in sorted(transition_effects.items()):
+                smooth_audio = transition_type == "crossfade"
+                transition_command = []
+
+                def fake_transition_popen(argv, **_kwargs):
+                    transition_command.extend(argv)
+                    Path(argv[-1]).write_bytes(b"fake transition MP4")
+                    return FakeProcess()
+
+                transitioned_edit = {
+                    **multi_edit,
+                    "transitions": {"a>b": {"type": transition_type, "duration": 0.5, "smooth_audio": smooth_audio}},
+                }
+                with patch("clipper.media.executable", return_value="ffmpeg"), \
+                     patch("clipper.media.subprocess.Popen", side_effect=fake_transition_popen), \
+                 patch("clipper.media.probe", return_value={"duration": 4.5, "width": 720, "height": 1280, "video_codec": "h264", "audio_codec": "aac"}):
+                    render("input.mp4", clip, transitioned_edit, [], uuid.uuid4().hex, threading.Event(), lambda _progress: None, has_audio=True)
+                transition_graph = transition_command[transition_command.index("-filter_complex") + 1]
+                assert f"xfade=transition={effect}:duration=0.500000000:offset=1.500000000" in transition_graph
+                assert transition_command[transition_command.index("-t") + 1] == "4.500000"
+                if smooth_audio:
+                    assert "acrossfade=d=0.500000000" in transition_graph
+                else:
+                    assert "atrim=start=0.250000000" in transition_graph
+                Path(transition_command[-1]).unlink(missing_ok=True)
+
+            inserted_command = []
+
+            def fake_insert_popen(argv, **_kwargs):
+                inserted_command.extend(argv)
+                Path(argv[-1]).write_bytes(b"fake inserted-slot MP4")
+                return FakeProcess()
+
+            inserted_edit = {
+                **multi_edit,
+                "resolution": "1080",
+                "fps": 60,
+                "transitions": {"a>b": {"type": "crossfade", "timing_mode": "insert_slot", "duration": 0.5, "smooth_audio": True}},
+            }
+            with patch("clipper.media.executable", return_value="ffmpeg"), \
+                 patch("clipper.media._video_encoder", return_value=["-c:v", "libx264"]), \
+                 patch("clipper.media.subprocess.Popen", side_effect=fake_insert_popen), \
+                 patch("clipper.media.probe", return_value={"duration": 5.5, "width": 1080, "height": 1920, "video_codec": "h264", "audio_codec": "aac"}):
+                render("input.mp4", clip, inserted_edit, [], uuid.uuid4().hex, threading.Event(), lambda _progress: None, has_audio=True)
+            inserted_graph = inserted_command[inserted_command.index("-filter_complex") + 1]
+            assert inserted_command[inserted_command.index("-t") + 1] == "5.500000"
+            assert "scale=1080:1920" in inserted_graph and "fps=60" in inserted_graph and "setpts=PTS-STARTPTS" in inserted_graph
+            assert "[v0]split=2[vmain_src_0][vhold_src_0]" in inserted_graph
+            assert "[v1]split=2[vto_hold_src_0][vto_main_src_0]" in inserted_graph
+            assert "[vmain_src_0]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920:" in inserted_graph
+            assert "[vto_main_src_0]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920:" in inserted_graph
+            assert "[vmain_0][vslot_0][vto_main_0]concat=n=3:v=1:a=0" in inserted_graph
+            assert "xfade=transition=fade:duration=0.500000000:offset=0" in inserted_graph and "trim=end_frame=30" in inserted_graph
+            assert "concat=n=3:v=1:a=0" in inserted_graph and "anullsrc=r=48000:cl=stereo,atrim=duration=0.500000000" in inserted_graph
+            assert "afade=t=out" in inserted_graph and "afade=t=in" in inserted_graph and "acrossfade" not in inserted_graph
+            Path(inserted_command[-1]).unlink(missing_ok=True)
+
+            wipe_insert_command = []
+
+            def fake_wipe_insert_popen(argv, **_kwargs):
+                wipe_insert_command.extend(argv)
+                Path(argv[-1]).write_bytes(b"fake wipe insert MP4")
+                return FakeProcess()
+
+            wipe_insert_edit = {
+                **multi_edit,
+                "transitions": {"a>b": {"type": "wipeleft", "timing_mode": "insert_slot", "duration": 0.5, "smooth_audio": False}},
+            }
+            with patch("clipper.media.executable", return_value="ffmpeg"), \
+                 patch("clipper.media.subprocess.Popen", side_effect=fake_wipe_insert_popen), \
+                 patch("clipper.media.probe", return_value={"duration": 5.5, "width": 720, "height": 1280, "video_codec": "h264", "audio_codec": "aac"}):
+                render("input.mp4", clip, wipe_insert_edit, [], uuid.uuid4().hex, threading.Event(), lambda _progress: None, has_audio=True)
+            wipe_insert_graph = wipe_insert_command[wipe_insert_command.index("-filter_complex") + 1]
+            assert "xfade=transition=wipeleft:duration=0.500000000:offset=0" in wipe_insert_graph
+            Path(wipe_insert_command[-1]).unlink(missing_ok=True)
+
+            dip_command = []
+
+            def fake_dip_popen(argv, **_kwargs):
+                dip_command.extend(argv)
+                Path(argv[-1]).write_bytes(b"fake dip-slot MP4")
+                return FakeProcess()
+
+            dip_edit = {
+                **multi_edit,
+                "transitions": {"a>b": {"type": "dip_to_black", "timing_mode": "insert_slot", "duration": 0.5, "smooth_audio": False}},
+            }
+            with patch("clipper.media.executable", return_value="ffmpeg"), \
+                 patch("clipper.media.subprocess.Popen", side_effect=fake_dip_popen), \
+                 patch("clipper.media.probe", return_value={"duration": 5.5, "width": 720, "height": 1280, "video_codec": "h264", "audio_codec": "aac"}):
+                render("input.mp4", clip, dip_edit, [], uuid.uuid4().hex, threading.Event(), lambda _progress: None, has_audio=False)
+            dip_graph = dip_command[dip_command.index("-filter_complex") + 1]
+            assert "fade=t=out" in dip_graph and "fade=t=in" in dip_graph and "concat=n=3:v=1:a=0" in dip_graph
+            assert "anullsrc=r=48000:cl=stereo,atrim=duration=0.500000000" in dip_graph
+            Path(dip_command[-1]).unlink(missing_ok=True)
+
+            failure_id = uuid.uuid4().hex
+            failure_target = CLIP_DIR / f"{clip['id']}-{failure_id}.mp4"
+
+            class FailedProcess(FakeProcess):
+                def __init__(self):
+                    super().__init__()
+                    self.returncode = 1
+
+            def fake_failed_popen(argv, **kwargs):
+                kwargs["stderr"].write(b"Invalid transition filtergraph")
+                Path(argv[-1]).write_bytes(b"partial MP4")
+                return FailedProcess()
+
+            try:
+                with patch("clipper.media.executable", return_value="ffmpeg"), \
+                     patch("clipper.media.subprocess.Popen", side_effect=fake_failed_popen), \
+                     patch("clipper.media.probe", return_value={"duration": 4.5, "width": 720, "height": 1280, "video_codec": "h264", "audio_codec": "aac"}):
+                    render("input.mp4", clip, {**multi_edit, "transitions": {"a>b": {"type": "crossfade", "duration": 0.5}}}, [], failure_id, threading.Event(), lambda _progress: None, has_audio=True)
+            except MediaError as exc:
+                assert "Invalid transition filtergraph" in str(exc)
+            else:
+                raise AssertionError("failed transition render must surface FFmpeg error")
+            assert not failure_target.exists(), "failed render must remove partial MP4 output"
+
+            fractional_trim = client.patch(f"/api/clips/{second['clip_id']}", json={
+                "scene_mode": "single", "trim_start": 0.13, "trim_end": 8.87,
+                "subtitle_mode": "off", "subtitle_enabled": False, "subtitle_timebase": "clip",
+                "subtitle_segments": [], "subtitle_tracks": [],
+                "subtitle_active_track_id": None, "subtitle_active_translation_id": None,
+            })
+            assert fractional_trim.status_code == 200, fractional_trim.text
+            with patch("clipper.main.local_transcription_available", return_value=True):
+                fractional_job_response = client.post(
+                    f"/api/clips/{second['clip_id']}/subtitles/transcribe",
+                    json={"provider": "local", "language": "indonesia"},
+                )
+            assert fractional_job_response.status_code == 200, fractional_job_response.text
+            with connect() as conn:
+                fractional_job = dict(conn.execute("SELECT * FROM jobs WHERE id=?", (fractional_job_response.json()["id"],)).fetchone())
+            fractional_options = json.loads(fractional_job["options_json"])
+            assert composition_signature(fractional_options["scenes"]) != fractional_options["composition_signature"]
+            edit_during_transcription = client.patch(f"/api/clips/{second['clip_id']}", json={"subtitle_mode": "manual"})
+            assert edit_during_transcription.status_code == 409
+            with patch("clipper.jobs.extract_composition_audio", return_value=8.73), \
+                 patch("clipper.jobs.transcribe", return_value=([{"start": 0.5, "end": 1.5, "text": "Fractional trim cue."}], "id", "fixture")):
+                runner._process(fractional_job, threading.Event())
+            fractional_result = client.get(f"/api/clips/{second['clip_id']}").json()
+            fractional_track = next(track for track in fractional_result["clip"]["edit"]["subtitle_tracks"] if track["id"] == fractional_options["track_id"])
+            assert fractional_track["composition_signature"] == fractional_result["subtitle_status"]["composition_signature"]
+            assert fractional_track["id"] not in fractional_result["subtitle_status"]["stale_track_ids"]
+            fractional_edit = fractional_result["clip"]["edit"]
+            fractional_track["composition_signature"] = composition_signature(fractional_options["scenes"])
+            assert fractional_track["composition_signature"] != fractional_result["subtitle_status"]["composition_signature"]
+            stale_metadata_save = client.patch(f"/api/clips/{second['clip_id']}", json=fractional_edit)
+            assert stale_metadata_save.status_code == 200, stale_metadata_save.text
+            repaired_result = client.get(f"/api/clips/{second['clip_id']}").json()
+            repaired_track = next(track for track in repaired_result["clip"]["edit"]["subtitle_tracks"] if track["id"] == fractional_options["track_id"])
+            assert repaired_track["composition_signature"] == repaired_result["subtitle_status"]["composition_signature"]
+            assert repaired_track["id"] not in repaired_result["subtitle_status"]["stale_track_ids"]
+            repaired_edit = repaired_result["clip"]["edit"]
+            repaired_track["composition_signature"] = composition_signature(fractional_options["scenes"])
+            repaired_track["composition_fingerprint"] = "0" * 64
+            repaired_edit.update({
+                "subtitle_active_track_id": repaired_track["id"], "subtitle_active_translation_id": None,
+                "subtitle_segments": repaired_track["segments"], "subtitle_timebase": "output",
+                "subtitle_mode": "auto", "subtitle_enabled": True,
+            })
+            repaired_track["composition_signature"] = repaired_result["subtitle_status"]["composition_signature"]
+            repaired_track["composition_fingerprint"] = repaired_result["subtitle_status"]["composition_fingerprint"]
+            use_track_save = client.patch(f"/api/clips/{second['clip_id']}", json=repaired_edit)
+            assert use_track_save.status_code == 200, use_track_save.text
+            subtitle_export = client.get(f"/api/clips/{second['clip_id']}/subtitles/export", params={"format": "srt", "track_id": repaired_track["id"]})
+            assert subtitle_export.status_code == 200 and "Fractional trim cue." in subtitle_export.text
 
             print("Quick Clip API, manual/auto subtitles, audio consent/range, AI isolation, render, review, cancel/retry checks passed")
 

@@ -30,18 +30,24 @@ from .media import (
     download_url,
     extract_subtitle_audio,
     local_transcription_available,
-    MAX_MULTI_SCENE_SECONDS,
+    MAX_OUTPUT_SECONDS,
     MAX_SCENES,
+    MAX_TRANSITION_SECONDS,
+    MIN_TRANSITION_SECONDS,
     MIN_SCENE_SECONDS,
+    normalize_scene_transitions,
     output_scenes,
     probe,
     render_subtitle_segments,
+    scene_output_duration,
+    source_interval_visible,
     save_upload,
     source_subtitle_segments,
     transcript_cache_matches,
     transcribe,
     transcribe_gemini,
     transcribe_openai,
+    validate_scene_transitions,
 )
 from .providers import ProviderError, check_local
 from .subtitles import (
@@ -123,7 +129,7 @@ class SubtitleTrack(BaseModel):
     source_type: Literal["manual", "generated", "imported", "translation"]
     language: str = Field(default="und", min_length=2, max_length=35)
     provider: str | None = Field(default=None, max_length=80)
-    model: str | None = Field(default=None, max_length=120)
+    model: str | None = Field(default=None, max_length=2048)
     timebase: Literal["output", "source", "clip"]
     segments: list[SubtitleSegment] = Field(default_factory=list, max_length=500)
     transcript_text: str | None = Field(default=None, max_length=100000)
@@ -143,6 +149,23 @@ class ClipScene(BaseModel):
     source_end: float = Field(gt=0)
     order: int = Field(ge=0, le=11)
     role: Literal["hook", "body", "ending"] = "body"
+
+
+SceneTransitionType = Literal[
+    "none", "crossfade", "dip_to_black", "zoom_blur",
+    "wipeleft", "wiperight", "wipeup", "wipedown",
+    "slideleft", "slideright", "slideup", "slidedown",
+    "smoothleft", "smoothright", "smoothup", "smoothdown",
+    "circleopen", "circleclose", "dissolve", "pixelize", "radial", "fadewhite",
+]
+
+
+class ClipSceneTransition(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: SceneTransitionType = "none"
+    duration: float = Field(default=0.5, ge=0.001, le=180)
+    timing_mode: Literal["insert_slot", "overlap"] = "overlap"
+    smooth_audio: bool = False
 
 
 class ClipAudioSettings(BaseModel):
@@ -192,6 +215,7 @@ class ClipEdit(BaseModel):
     trim_end: float | None = Field(default=None, gt=0)
     scene_mode: Literal["single", "multi"] | None = None
     scenes: list[ClipScene] | None = Field(default=None, max_length=MAX_SCENES)
+    transitions: dict[str, ClipSceneTransition] | None = Field(default=None, max_length=MAX_SCENES - 1)
     subtitle_enabled: bool | None = None
     subtitle_mode: Literal["off", "manual", "auto", "import"] | None = None
     subtitle_segments: list[SubtitleSegment] | None = Field(default=None, max_length=500)
@@ -1301,12 +1325,11 @@ def list_clips():
 @app.get("/api/clips/{clip_id}")
 def get_clip(clip_id: str):
     with connect() as conn:
-        clip = unpack(
-            conn.execute("SELECT c.*,CASE WHEN j.kind='batch_draft' THEN 'quick_clip' ELSE j.kind END AS origin,j.options_json AS source_job_options_json FROM clips c JOIN jobs j ON j.id=c.job_id WHERE c.id=?", (clip_id,)).fetchone(),
-            ("edit_json",),
-        )
+        clip_row = conn.execute("SELECT c.*,CASE WHEN j.kind='batch_draft' THEN 'quick_clip' ELSE j.kind END AS origin,j.options_json AS source_job_options_json FROM clips c JOIN jobs j ON j.id=c.job_id WHERE c.id=?", (clip_id,)).fetchone()
+        clip = unpack(clip_row, ("edit_json",))
         if clip is None:
             raise HTTPException(404, "Clip not found.")
+        original_edit_json = clip_row["edit_json"]
         source_job_options = json.loads(clip.pop("source_job_options_json") or "{}")
         raw_reference = source_job_options.get("youtube_reference")
         clip["youtube_reference"] = raw_reference if isinstance(raw_reference, dict) else None
@@ -1330,10 +1353,12 @@ def get_clip(clip_id: str):
     }])
     if not isinstance(edit.get("scenes"), list):
         edit["scenes"] = []
+    edit.setdefault("transitions", {})
     for index, scene in enumerate(edit["scenes"]):
         scene.setdefault("id", f"scene-{clip_id}-{index}")
         scene.setdefault("order", index)
         scene.setdefault("role", "body")
+    edit["transitions"] = normalize_scene_transitions(edit["scenes"], edit["transitions"])
     edit.setdefault("fps", 30)
     edit.setdefault("quality", "balanced")
     edit["audio"] = {"volume": 1, "muted": False, "fade_in": 0, "fade_out": 0, "normalize": False, "target_lufs": -18, "limiter": False, **(edit.get("audio") or {})}
@@ -1374,17 +1399,33 @@ def get_clip(clip_id: str):
     scenes = output_scenes(clip, edit)
     signature = composition_signature(scenes)
     fingerprint = composition_fingerprint(source_row["sha256"], signature)
+    repaired_track_ids = set()
     source_tracks = {track.get("id"): track.get("segments", []) for track in edit["subtitle_tracks"]}
     source_tracks["legacy"] = edit["subtitle_segments"]
     outdated_translations = []
     stale_tracks = []
     for track in edit["subtitle_tracks"]:
-        if track.get("timebase") == "output" and track.get("composition_fingerprint") != fingerprint:
-            stale_tracks.append(track["id"])
+        if track.get("timebase") == "output":
+            if track.get("composition_fingerprint") == fingerprint:
+                if track.get("composition_signature") != signature:
+                    track["composition_signature"] = signature
+                    repaired_track_ids.add(track["id"])
+            else:
+                stale_tracks.append(track["id"])
         if track.get("source_type") == "translation":
             original = source_tracks.get(track.get("source_track_id"), [])
             if translation_is_outdated(track, original):
                 outdated_translations.append(track["id"])
+    if repaired_track_ids:
+        stored_edit = json.loads(original_edit_json)
+        for track in stored_edit.get("subtitle_tracks", []):
+            if track.get("id") in repaired_track_ids:
+                track["composition_signature"] = signature
+        with connect() as conn:
+            conn.execute(
+                "UPDATE clips SET edit_json=? WHERE id=? AND edit_json=?",
+                (json.dumps(stored_edit, ensure_ascii=False), clip_id, original_edit_json),
+            )
     return {
         "clip": clip,
         "source": source,
@@ -1439,6 +1480,12 @@ def edit_clip(clip_id: str, body: ClipEdit):
             raise HTTPException(409, "Cancel pending YouTube upload before editing this clip.")
         if conn.execute("SELECT 1 FROM jobs WHERE clip_id=? AND kind='render' AND status IN ('queued','preparing','rendering')", (clip_id,)).fetchone():
             raise HTTPException(409, "Wait for the active render to finish or cancel it before editing.")
+        if conn.execute(
+            "SELECT 1 FROM jobs WHERE clip_id=? AND kind IN ('subtitle_transcribe','subtitle_translate') "
+            "AND status IN ('queued','preparing','preparing_audio','uploading','transcribing','processing_result')",
+            (clip_id,),
+        ).fetchone():
+            raise HTTPException(409, "Wait for the subtitle job to finish or cancel it before editing.")
         batch_item = conn.execute(
             "SELECT i.id,i.batch_id,i.status,i.job_id,b.status AS batch_status FROM video_batch_items i "
             "JOIN video_batches b ON b.id=i.batch_id WHERE i.clip_id=?",
@@ -1464,7 +1511,7 @@ def edit_clip(clip_id: str, body: ClipEdit):
         source_info = conn.execute("SELECT duration,sha256 FROM sources WHERE id=?", (clip["source_id"],)).fetchone()
         source_duration = source_info["duration"]
         if any(key in changes and changes[key] is None for key in (
-            "trim_start", "trim_end", "scene_mode", "scenes", "subtitle_mode", "subtitle_enabled",
+            "trim_start", "trim_end", "scene_mode", "scenes", "transitions", "subtitle_mode", "subtitle_enabled",
             "subtitle_segments", "subtitle_tracks", "subtitle_timebase", "subtitle_display_mode", "subtitle_caption_mode",
             "subtitle_preset", "subtitle_animation", "subtitle_font", "subtitle_outline_color", "subtitle_highlight_color",
             "subtitle_animation_intensity", "subtitle_animation_duration",
@@ -1519,8 +1566,6 @@ def edit_clip(clip_id: str, body: ClipEdit):
         if scene_mode == "multi" and not scenes:
             raise HTTPException(422, "Multi-Scene needs at least one scene.")
         output_duration = float(next_edit.get("trim_end", clip["end"] - clip["start"])) - float(next_edit.get("trim_start", 0))
-        if scene_mode == "multi" and scenes:
-            output_duration = sum(scene["source_end"] - scene["source_start"] for scene in scenes)
         if scenes is not None:
             if not scenes or len(scenes) > MAX_SCENES:
                 raise HTTPException(422, f"Scene count must be between 1 and {MAX_SCENES}.")
@@ -1539,10 +1584,36 @@ def edit_clip(clip_id: str, body: ClipEdit):
                 if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end > source_duration or too_short:
                     message = f"Each Multi-Scene interval must be at least {MIN_SCENE_SECONDS:.1f}s and stay within source duration." if scene_mode == "multi" else "Single Scene interval must stay within source duration."
                     raise HTTPException(422, message)
-            if scene_mode == "multi":
-                output_duration = sum(scene["source_end"] - scene["source_start"] for scene in ordered_scenes)
-                if output_duration > MAX_MULTI_SCENE_SECONDS:
-                    raise HTTPException(422, f"Multi-Scene output cannot exceed {MAX_MULTI_SCENE_SECONDS}s.")
+        transition_scenes = ordered_scenes if scene_mode == "multi" and scenes else scenes[:1] if scenes else []
+        normalized_transitions = normalize_scene_transitions(transition_scenes, next_edit.get("transitions", {}))
+        previous_scene_list = edit.get("scenes") or []
+        previous_transitions = normalize_scene_transitions(previous_scene_list, edit.get("transitions", {}))
+        previous_transition_timing = {}
+        for key, item in previous_transitions.items():
+            if item.get("type", "none") == "none":
+                continue
+            try:
+                previous_transition_timing[key] = (float(item.get("duration", 0.25)), item.get("timing_mode", "overlap"))
+            except (TypeError, ValueError):
+                continue
+        for key, transition in normalized_transitions.items():
+            if transition.get("type", "none") == "none":
+                continue
+            try:
+                duration = float(transition.get("duration", 0.25))
+            except (TypeError, ValueError):
+                continue  # validate_scene_transitions returns the canonical error below
+            timing = (duration, transition.get("timing_mode", "overlap"))
+            if timing != previous_transition_timing.get(key) and not (MIN_TRANSITION_SECONDS <= duration <= MAX_TRANSITION_SECONDS):
+                raise HTTPException(422, f"New transition duration must be {MIN_TRANSITION_SECONDS:.1f}-{MAX_TRANSITION_SECONDS:g} seconds.")
+        try:
+            validate_scene_transitions(transition_scenes, normalized_transitions, int(next_edit.get("fps", 30)))
+        except MediaError as exc:
+            raise HTTPException(422, str(exc)) from None
+        if normalized_transitions != next_edit.get("transitions", {}):
+            changes["transitions"] = normalized_transitions
+        next_edit["transitions"] = normalized_transitions
+        output_duration = scene_output_duration(output_scenes(clip, next_edit))
         if "subtitle_tracks" in changes:
             current_signature = composition_signature(output_scenes(clip, next_edit))
             current_fingerprint = composition_fingerprint(source_info["sha256"], current_signature)
@@ -1683,10 +1754,8 @@ def edit_clip(clip_id: str, body: ClipEdit):
                 word_pop_segments = [item for item in word_pop_segments if item["start"] < output_end and item["end"] > 0]
             else:
                 source_offset = float(clip["start"]) if track_timebase == "clip" else 0
-                word_pop_segments = [item for item in word_pop_segments if any(
-                    item["end"] + source_offset > scene["source_start"]
-                    and item["start"] + source_offset < scene["source_end"]
-                    for scene in scenes
+                word_pop_segments = [item for item in word_pop_segments if source_interval_visible(
+                    item["start"] + source_offset, item["end"] + source_offset, scenes,
                 )]
             if not word_pop_segments or any(not valid_word_alignment(segment) for segment in word_pop_segments):
                 raise HTTPException(422, "Word Pop needs reviewed, non-overlapping word timestamps for every caption. Add manual timings or use a word-timestamp provider.")
@@ -1925,7 +1994,7 @@ def queue_clip_subtitle_transcription(clip_id: str, body: SubtitleTranscriptionR
         if not os.environ.get(key_name, "").strip():
             raise HTTPException(400, f"Set {key_name} before selecting {body.provider} speech-to-text.")
     scenes = output_scenes(clip, edit)
-    duration = sum(scene["duration"] for scene in scenes)
+    duration = scene_output_duration(scenes)
     if not math.isfinite(duration) or duration <= 0:
         raise HTTPException(422, "Current composition has no valid output duration.")
     if body.provider == "gemini" and duration > 1800:
@@ -1938,17 +2007,17 @@ def queue_clip_subtitle_transcription(clip_id: str, body: SubtitleTranscriptionR
     if cached_model:
         cached = next((track for track in edit.get("subtitle_tracks", [])
                        if track.get("source_type") == "generated" and track.get("provider") == body.provider
-                       and track.get("model") == cached_model and track.get("language") in {body.language, "unknown", "id-ID", "en-US"}
-                       and track.get("composition_fingerprint") == fingerprint), None)
+                        and track.get("model") == cached_model and track.get("language") in {body.language, "unknown", "id-ID", "en-US"}
+                        and track.get("composition_fingerprint") == fingerprint), None)
         if cached:
             return {"cached": True, "track": cached, "duration": duration}
     if len(edit.get("subtitle_tracks", [])) >= 20:
         raise HTTPException(409, "Subtitle track limit reached (20). Remove a draft before transcribing.")
-    snapshot = {key: edit[key] for key in ("scene_mode", "scenes", "trim_start", "trim_end") if key in edit}
+    snapshot = {key: edit[key] for key in ("scene_mode", "scenes", "transitions", "trim_start", "trim_end") if key in edit}
     options = {
         "provider": body.provider, "language": body.language, "consent_at": now() if body.provider != "local" else None,
         "duration": duration, "edit_snapshot": snapshot,
-        "scenes": [{key: scene[key] for key in ("id", "source_start", "source_end")} for scene in scenes],
+        "scenes": [{key: scene[key] for key in ("id", "source_start", "source_end", "timeline_start", "transition_duration", "transition_timing_mode")} for scene in scenes],
         "composition_signature": signature, "composition_fingerprint": fingerprint,
         "track_id": f"stt-{uuid.uuid4().hex}",
     }
@@ -1979,7 +2048,7 @@ def queue_clip_subtitle_translation(clip_id: str, body: SubtitleTranslationReque
         with connect() as conn:
             source = conn.execute("SELECT sha256 FROM sources WHERE id=?", (clip["source_id"],)).fetchone()
         current_signature = composition_signature(output_scenes(clip, edit))
-        if source_track.get("composition_signature") != current_signature or source_track.get("composition_fingerprint") != composition_fingerprint(source["sha256"], current_signature):
+        if source_track.get("composition_fingerprint") != composition_fingerprint(source["sha256"], current_signature):
             raise HTTPException(409, "Selected subtitle track is stale. Regenerate or choose another track before translating.")
     source_segments = [item for item in source_segments if str(item.get("text") or "").strip()]
     if not source_segments:
@@ -2019,7 +2088,7 @@ def import_clip_subtitles(clip_id: str, body: SubtitleImportRequest):
     clip = dict(row)
     edit = json.loads(clip["edit_json"])
     scenes = output_scenes(clip, edit)
-    duration = sum(scene["duration"] for scene in scenes)
+    duration = scene_output_duration(scenes)
     try:
         segments, warnings = parse_subtitle_file(body.text, body.format, duration, clamp=body.clamp)
     except ValueError as exc:
@@ -2117,6 +2186,9 @@ def render_clip(clip_id: str):
         ).fetchone():
             raise HTTPException(409, "Cancel pending YouTube upload before rendering this clip.")
         edit = json.loads(clip["edit_json"])
+        output_duration = scene_output_duration(output_scenes(dict(clip), edit))
+        if output_duration > MAX_OUTPUT_SECONDS:
+            raise HTTPException(422, f"Final output cannot exceed {MAX_OUTPUT_SECONDS} seconds. Shorten the timeline before rendering.")
         if edit.get("subtitle_enabled") and edit.get("subtitle_caption_mode") == "word_pop":
             try:
                 render_subtitle_segments(dict(clip), edit, json.loads(clip["transcript_json"] or "[]"), clip["sha256"])

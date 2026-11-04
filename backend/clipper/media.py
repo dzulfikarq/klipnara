@@ -27,7 +27,17 @@ class MediaError(RuntimeError):
 
 MIN_SCENE_SECONDS = 0.5
 MAX_SCENES = 12
-MAX_MULTI_SCENE_SECONDS = 180
+MAX_OUTPUT_SECONDS = 180
+SCENE_TRANSITION_TYPES = {
+    "none", "crossfade", "dip_to_black", "zoom_blur",
+    "wipeleft", "wiperight", "wipeup", "wipedown",
+    "slideleft", "slideright", "slideup", "slidedown",
+    "smoothleft", "smoothright", "smoothup", "smoothdown",
+    "circleopen", "circleclose", "dissolve", "pixelize", "radial", "fadewhite",
+}
+SCENE_TRANSITION_MODES = {"insert_slot", "overlap"}
+MIN_TRANSITION_SECONDS = 0.1
+MAX_TRANSITION_SECONDS = 2.0
 
 
 def executable(name, override):
@@ -461,7 +471,7 @@ def transcribe_gemini(path, language, duration, cancel, progress=lambda *_: None
 
 def extract_composition_audio(source, clip, edit, output, cancel, progress=lambda *_: None, *, local=False):
     scenes = output_scenes(clip, edit)
-    duration = sum(scene["duration"] for scene in scenes)
+    duration = scene_output_duration(scenes)
     if not scenes or not math.isfinite(duration) or duration <= 0:
         raise MediaError("Clip needs at least one valid scene for subtitle transcription.")
     ffmpeg = executable("ffmpeg", "FFMPEG_PATH")
@@ -474,10 +484,14 @@ def extract_composition_audio(source, clip, edit, output, cancel, progress=lambd
             f"loudnorm=I=-20:TP=-1.5:LRA=11,aresample=16000,"
             f"aformat=sample_fmts=fltp:channel_layouts=mono[a{index}]"
         )
-        labels.append(f"[a{index}]")
-    graph.append(f"{''.join(labels)}concat=n={len(scenes)}:v=0:a=1[aout]")
+        labels.append(f"a{index}")
+    if any(scene.get("transition_duration", 0) for scene in scenes):
+        audio_output = _compose_scene_audio(graph, scenes, labels, "transcribe")
+    else:
+        graph.append(f"{''.join('[' + label + ']' for label in labels)}concat=n={len(scenes)}:v=0:a=1[aout]")
+        audio_output = "aout"
     codec = ["-c:a", "pcm_s16le", "-f", "wav"] if local else ["-c:a", "aac", "-b:a", "48k", "-f", "ipod"]
-    args.extend(["-filter_complex", ";".join(graph), "-map", "[aout]", "-vn", *codec, "-ar", "16000", "-ac", "1", str(output)])
+    args.extend(["-filter_complex", ";".join(graph), "-map", f"[{audio_output}]", "-t", f"{duration:.6f}", "-vn", *codec, "-ar", "16000", "-ac", "1", str(output)])
     progress("preparing_audio", "FFmpeg mengekstrak dan menyambung audio sesuai urutan komposisi")
     try:
         _run(args, cancel)
@@ -490,30 +504,197 @@ def extract_composition_audio(source, clip, edit, output, cancel, progress=lambd
     return duration
 
 
+def scene_transition_key(from_id, to_id):
+    return f"{from_id}>{to_id}"
+
+
+def normalize_scene_transitions(scenes, transitions):
+    ordered = sorted(scenes, key=lambda item: item.get("order", 0))
+    valid_keys = {scene_transition_key(scene["id"], ordered[index + 1]["id"]) for index, scene in enumerate(ordered[:-1])}
+    return {
+        key: {
+            "type": value.get("type", "none"),
+            "duration": value.get("duration", 0.5 if value.get("timing_mode") == "insert_slot" else 0.25),
+            "timing_mode": value.get("timing_mode", "overlap"),
+            "smooth_audio": value.get("smooth_audio", False),
+        }
+        for key, value in (transitions.items() if isinstance(transitions, dict) else [])
+        if key in valid_keys and isinstance(value, dict)
+    }
+
+
+def _transition_frames(duration, fps):
+    value = float(duration)
+    return max(1, math.floor(value * fps + 0.5)) if value > 0 else 0
+
+
+def _transition_frame_counts(scenes, transitions, fps):
+    ordered = sorted(scenes, key=lambda item: item.get("order", 0))
+    frames = []
+    for index, scene in enumerate(ordered[:-1]):
+        transition = transitions.get(scene_transition_key(scene["id"], ordered[index + 1]["id"]), {})
+        frames.append(_transition_frames(transition.get("duration", 0.25), fps) if transition.get("type", "none") != "none" else 0)
+    overlap_frames = [
+        sum(frames[boundary] for boundary in (index - 1, index)
+            if 0 <= boundary < len(frames)
+            and transitions.get(scene_transition_key(ordered[boundary]["id"], ordered[boundary + 1]["id"]), {}).get("timing_mode", "overlap") == "overlap")
+        for index in range(len(ordered))
+    ]
+    scene_frames = [math.floor((float(scene["source_end"]) - float(scene["source_start"])) * fps + 1e-6) for scene in ordered]
+    while True:
+        overflowing = next((index for index, count in enumerate(overlap_frames) if count > scene_frames[index]), -1)
+        if overflowing < 0:
+            break
+        excess, reduced = overlap_frames[overflowing] - scene_frames[overflowing], False
+        for candidate in (overflowing, overflowing - 1):
+            if not 0 <= candidate < len(frames) or frames[candidate] <= 0:
+                continue
+            key = scene_transition_key(ordered[candidate]["id"], ordered[candidate + 1]["id"])
+            if transitions.get(key, {}).get("timing_mode", "overlap") != "overlap":
+                continue
+            reduction = min(excess, frames[candidate])
+            frames[candidate] -= reduction
+            overlap_frames[overflowing] -= reduction
+            other_scene = candidate + 1 if candidate == overflowing else candidate
+            overlap_frames[other_scene] -= reduction
+            excess -= reduction
+            reduced = True
+            if not excess:
+                break
+        if not reduced:
+            break
+    return frames
+
+
+def validate_scene_transitions(scenes, transitions, fps=30):
+    ordered = sorted(scenes, key=lambda item: item.get("order", 0))
+    overlap_seconds = [0.0] * len(ordered)
+    for index in range(len(ordered) - 1):
+        key = scene_transition_key(ordered[index]["id"], ordered[index + 1]["id"])
+        transition = transitions.get(key, {})
+        kind = transition.get("type", "none")
+        mode = transition.get("timing_mode", "overlap")
+        if kind not in SCENE_TRANSITION_TYPES:
+            raise MediaError("Scene transition type is not supported.")
+        if mode not in SCENE_TRANSITION_MODES:
+            raise MediaError("Scene transition timing mode is not supported.")
+        if kind == "none":
+            if transition.get("smooth_audio", False):
+                raise MediaError("Smooth audio requires a visual scene transition.")
+            continue
+        try:
+            duration = float(transition.get("duration", 0.5 if mode == "insert_slot" else 0.25))
+        except (TypeError, ValueError):
+            raise MediaError("Scene transition duration must be a number of at least 0.001 seconds.") from None
+        frames = _transition_frames(duration, fps) if math.isfinite(duration) else 0
+        if not math.isfinite(duration) or duration <= 0 or frames <= 0:
+            raise MediaError("Scene transition duration must be positive and resolve to at least one frame.")
+        if kind == "zoom_blur" and mode == "insert_slot":
+            raise MediaError("Legacy Zoom Blur supports Overlap only; renderer uses Crossfade.")
+        if mode == "overlap":
+            from_duration = float(ordered[index]["source_end"]) - float(ordered[index]["source_start"])
+            to_duration = float(ordered[index + 1]["source_end"]) - float(ordered[index + 1]["source_start"])
+            if duration > min(from_duration, to_duration) + 0.001:
+                raise MediaError("Scene transition overlap must fit inside both connected scenes.")
+            overlap_seconds[index] += duration
+            overlap_seconds[index + 1] += duration
+    if any(overlap_seconds[index] > float(scene["source_end"]) - float(scene["source_start"]) + 0.001 for index, scene in enumerate(ordered)):
+        raise MediaError("Incoming and outgoing overlaps must fit inside each scene.")
+    transition_frames = _transition_frame_counts(ordered, transitions, fps)
+    overlap_frames = [
+        sum(transition_frames[boundary] for boundary in (index - 1, index)
+            if 0 <= boundary < len(transition_frames)
+            and transitions.get(scene_transition_key(ordered[boundary]["id"], ordered[boundary + 1]["id"]), {}).get("timing_mode", "overlap") == "overlap")
+        for index in range(len(ordered))
+    ]
+    if any(overlap_frames[index] > math.floor((scene["source_end"] - scene["source_start"]) * fps + 1e-6) for index, scene in enumerate(ordered)):
+        raise MediaError("Incoming and outgoing overlap frames must fit inside each scene.")
+
+
 def output_scenes(clip, edit):
-    """Return ordered source ranges with derived, contiguous output timestamps."""
+    """Return source ranges with transition-aware, contiguous output timestamps."""
     stored = edit.get("scenes")
     if edit.get("scene_mode", "single") == "multi" and isinstance(stored, list) and stored:
         scenes = sorted(stored, key=lambda item: item.get("order", 0))
         scenes = [{**item, "id": item.get("id") or f"scene-{clip['id']}-{index}"} for index, item in enumerate(scenes)]
+        transitions = normalize_scene_transitions(scenes, edit.get("transitions", {}))
+        fps = int(edit.get("fps", 30))
+        validate_scene_transitions(scenes, transitions, fps)
     else:
         start = float(clip["start"]) + float(edit.get("trim_start", 0))
         end = float(clip["start"]) + float(edit.get("trim_end", clip["end"] - clip["start"]))
         scenes = [{"id": f"scene-{clip['id']}", "source_start": start, "source_end": end, "order": 0, "role": "body"}]
-    cursor, result = 0.0, []
-    for scene in scenes:
+        transitions = {}
+    fps = int(edit.get("fps", 30))
+    if fps not in {30, 60}:
+        fps = 30
+    transition_frames_by_boundary = _transition_frame_counts(scenes, transitions, fps)
+    ticks_per_second, ticks_per_frame = fps * 1_000_000, 1_000_000
+    cursor_ticks, result = 0, []
+    for index, scene in enumerate(scenes):
         start, end = float(scene["source_start"]), float(scene["source_end"])
-        duration = end - start
+        source_frames = max(1, math.floor((end - start) * fps + 1e-6))
+        duration_ticks = source_frames * ticks_per_frame
+        duration = duration_ticks / ticks_per_second
+        timeline_start_ticks = cursor_ticks
+        timeline_end_ticks = timeline_start_ticks + duration_ticks
+        outgoing = transitions.get(scene_transition_key(scene["id"], scenes[index + 1]["id"]), {}) if index + 1 < len(scenes) else {}
+        transition_frames = transition_frames_by_boundary[index] if outgoing.get("type", "none") != "none" else 0
+        outgoing_duration = transition_frames / fps
+        timing_mode = outgoing.get("timing_mode", "insert_slot" if outgoing.get("type", "none") == "none" else "overlap")
+        transition_start_ticks = timeline_end_ticks - transition_frames * ticks_per_frame if timing_mode == "overlap" else timeline_end_ticks
         result.append({
             **scene,
             "source_start": start,
             "source_end": end,
             "duration": duration,
-            "timeline_start": cursor,
-            "timeline_end": cursor + duration,
+            "timeline_start": timeline_start_ticks / ticks_per_second,
+            "timeline_end": timeline_end_ticks / ticks_per_second,
+            "transition_to_next": outgoing,
+            "transition_duration": outgoing_duration,
+            "transition_frames": transition_frames,
+            "transition_timing_mode": timing_mode,
+            "transition_start": transition_start_ticks / ticks_per_second,
+            "transition_end": (transition_start_ticks + transition_frames * ticks_per_frame) / ticks_per_second,
         })
-        cursor += duration
+        cursor_ticks = timeline_end_ticks + transition_frames * ticks_per_frame * (1 if timing_mode == "insert_slot" else -1)
     return result
+
+
+def scene_output_duration(scenes):
+    return float(scenes[-1]["timeline_end"]) if scenes else 0.0
+
+
+def _compose_scene_audio(graph, scenes, labels, prefix):
+    current, duration = labels[0], float(scenes[0]["duration"])
+    for index, scene in enumerate(scenes[:-1]):
+        next_label = labels[index + 1]
+        transition_duration = float(scene.get("transition_duration", 0) or 0)
+        timing_mode = scene.get("transition_timing_mode", scene.get("transition_to_next", {}).get("timing_mode", "overlap"))
+        next_output = f"{prefix}_out_{index}"
+        if transition_duration and timing_mode == "insert_slot":
+            slot = f"{prefix}_silence_{index}"
+            current_input, next_input = current, next_label
+            if scene.get("transition_to_next", {}).get("smooth_audio"):
+                fade = min(transition_duration / 2, duration, float(scenes[index + 1]["duration"]))
+                current_input, next_input = f"{prefix}_fadeout_{index}", f"{prefix}_fadein_{index}"
+                graph.append(f"[{current}]afade=t=out:st={max(0, duration - fade):.6f}:d={fade:.6f}[{current_input}]")
+                graph.append(f"[{next_label}]afade=t=in:st=0:d={fade:.6f}[{next_input}]")
+            graph.append(f"anullsrc=r=48000:cl=stereo,atrim=duration={transition_duration:.9f},asetpts=PTS-STARTPTS[{slot}]")
+            graph.append(f"[{current_input}][{slot}][{next_input}]concat=n=3:v=0:a=1[{next_output}]")
+        elif transition_duration and scene.get("transition_to_next", {}).get("smooth_audio"):
+            graph.append(f"[{current}][{next_label}]acrossfade=d={transition_duration:.9f}:c1=tri:c2=tri[{next_output}]")
+        elif transition_duration:
+            cut = transition_duration / 2
+            left, right = f"{prefix}_left_{index}", f"{prefix}_right_{index}"
+            graph.append(f"[{current}]atrim=duration={max(0, duration - cut):.9f},asetpts=PTS-STARTPTS[{left}]")
+            graph.append(f"[{next_label}]atrim=start={cut:.9f},asetpts=PTS-STARTPTS[{right}]")
+            graph.append(f"[{left}][{right}]concat=n=2:v=0:a=1[{next_output}]")
+        else:
+            graph.append(f"[{current}][{next_label}]concat=n=2:v=0:a=1[{next_output}]")
+        duration += float(scenes[index + 1]["duration"]) + (transition_duration if timing_mode == "insert_slot" else -transition_duration)
+        current = next_output
+    return current
 
 
 def source_subtitle_segments(clip, edit, transcript):
@@ -595,13 +776,31 @@ def clip_subtitle_segments(clip, edit, transcript):
     ]
 
 
+def scene_source_ownership(scenes, index):
+    scene = scenes[index]
+    incoming_scene = scenes[index - 1] if index else None
+    incoming = float(incoming_scene.get("transition_duration", 0) or 0) if incoming_scene and incoming_scene.get("transition_timing_mode", "overlap") == "overlap" else 0.0
+    outgoing = float(scene.get("transition_duration", 0) or 0) if scene.get("transition_timing_mode", "overlap") == "overlap" else 0.0
+    rendered_end = min(scene["source_end"], scene["source_start"] + scene["duration"])
+    return scene["source_start"] + incoming / 2, rendered_end - outgoing / 2
+
+
+def source_interval_visible(start, end, scenes):
+    for index in range(len(scenes)):
+        owned_start, owned_end = scene_source_ownership(scenes, index)
+        if start < owned_end and end > owned_start:
+            return True
+    return False
+
+
 def map_scene_subtitles(clip, edit, transcript):
     source_segments = source_subtitle_segments(clip, edit, transcript)
     mapped, scenes = [], output_scenes(clip, edit)
-    for scene in scenes:
+    for index, scene in enumerate(scenes):
+        owned_start, owned_end = scene_source_ownership(scenes, index)
         for segment in source_segments:
-            start = max(scene["source_start"], segment["start"])
-            end = min(scene["source_end"], segment["end"])
+            start = max(owned_start, segment["start"])
+            end = min(owned_end, segment["end"])
             if start < end:
                 item = {
                     "id": f"{scene['id']}-{segment['id']}",
@@ -621,10 +820,10 @@ def map_scene_subtitles(clip, edit, transcript):
                         if not isinstance(word.get("start"), (int, float)) or not isinstance(word.get("end"), (int, float)):
                             item["words"].append(dict(word))
                             continue
-                        if word["end"] <= scene["source_start"] or word["start"] >= scene["source_end"]:
+                        if word["end"] <= owned_start or word["start"] >= owned_end:
                             continue
-                        source_word_start = max(scene["source_start"], word["start"])
-                        source_word_end = min(scene["source_end"], word["end"])
+                        source_word_start = max(owned_start, word["start"])
+                        source_word_end = min(owned_end, word["end"])
                         item["words"].append({
                             **word,
                             "start": scene["timeline_start"] + source_word_start - scene["source_start"],
@@ -651,22 +850,19 @@ def render_subtitle_segments(clip, edit, transcript, source_sha256):
         if active:
             active_timebase = active.get("timebase", "source")
             total_output = scenes[-1]["timeline_end"] if scenes else 0
+            source_offset = float(clip["start"]) if active_timebase == "clip" else 0
             alignment_segments = [item for item in alignment_segments if (
                 float(item["start"]) < total_output and float(item["end"]) > 0
                 if active_timebase == "output"
-                else any(
-                    float(item["end"]) + (float(clip["start"]) if active_timebase == "clip" else 0) > scene["source_start"]
-                    and float(item["start"]) + (float(clip["start"]) if active_timebase == "clip" else 0) < scene["source_end"]
-                    for scene in scenes
-                )
+                else source_interval_visible(float(item["start"]) + source_offset, float(item["end"]) + source_offset, scenes)
             )]
         else:
-            alignment_segments = [item for item in alignment_segments if any(item["end"] > scene["source_start"] and item["start"] < scene["source_end"] for scene in scenes)]
+            alignment_segments = [item for item in alignment_segments if source_interval_visible(item["start"], item["end"], scenes)]
         if not alignment_segments or any(not valid_word_alignment(item) for item in alignment_segments):
             raise MediaError("Word Pop needs reviewed, non-overlapping word timestamps for every caption. Add manual timings or use a word-timestamp provider.")
     if active:
         if active.get("timebase") == "output":
-            if active.get("composition_signature") != signature or active.get("composition_fingerprint") != composition_fingerprint(source_sha256, signature):
+            if active.get("composition_fingerprint") != composition_fingerprint(source_sha256, signature):
                 raise MediaError("Selected output-time subtitle track is stale after scene edits. Remap or regenerate before render.")
             segments = [dict(item, segment_id=item["id"]) for item in active.get("segments", [])]
         else:
@@ -745,7 +941,7 @@ def transcription_model_id():
 def _run(command, cancel):
     error_log = WORK_DIR / f"ffmpeg-{uuid.uuid4().hex}.log"
     try:
-        with error_log.open("wb") as stderr:
+        with error_log.open("w+b") as stderr:
             process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=stderr)
             try:
                 while process.poll() is None:
@@ -827,7 +1023,7 @@ def render(source, clip, edit, segments, job_id, cancel, progress, has_audio=Tru
     fps = int(edit.get("fps", 30))
     quality = edit.get("quality", "balanced")
     scenes = output_scenes(clip, edit)
-    duration = sum(scene["duration"] for scene in scenes)
+    duration = scene_output_duration(scenes)
     if not scenes or not math.isfinite(duration) or duration <= 0:
         raise MediaError("Clip needs at least one valid scene.")
     video_encoder = _video_encoder(ffmpeg, resolution, quality)
@@ -845,41 +1041,116 @@ def render(source, clip, edit, segments, job_id, cancel, progress, has_audio=Tru
     output_maps = []
     if multi_scene:
         graph = []
-        video_labels, audio_labels = [], []
+        video_labels, audio_labels, video_frame_counts = [], [], []
+        video_normalizer = (
+            f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{height}:(in_w-out_w)*{crop_x / 100:.4f}:(in_h-out_h)*{crop_y / 100:.4f},"
+            f"setsar=1,fps={fps},format=yuv420p,settb=AVTB"
+        )
         for index, scene in enumerate(scenes):
             scene_duration = scene["duration"]
-            input_args.extend(["-ss", f"{scene['source_start']:.3f}", "-t", f"{scene_duration:.3f}", "-i", str(source)])
+            frame_count = max(1, math.floor(scene_duration * fps + 1e-6))
+            video_frame_counts.append(frame_count)
+            input_args.extend(["-ss", f"{scene['source_start']:.6f}", "-t", f"{scene_duration:.6f}", "-i", str(source)])
             graph.append(
-                f"[{index}:v:0]trim=duration={scene_duration:.3f},setpts=PTS-STARTPTS,"
+                f"[{index}:v:0]trim=duration={scene_duration:.6f},setpts=PTS-STARTPTS,"
                 f"scale={width}:{height}:force_original_aspect_ratio=increase,"
                 f"crop={width}:{height}:(in_w-out_w)*{crop_x / 100:.4f}:(in_h-out_h)*{crop_y / 100:.4f},"
                 f"setsar=1,fps={fps},tpad=stop_mode=clone:stop_duration=1,"
-                f"trim=duration={scene_duration:.3f},setpts=PTS-STARTPTS,format=yuv420p,settb=AVTB[v{index}]"
+                f"trim=end_frame={frame_count},setpts=PTS-STARTPTS,format=yuv420p,settb=AVTB[v{index}]"
             )
-            video_labels.append(f"[v{index}]")
+            video_labels.append(f"v{index}")
             if has_audio and not (edit.get("audio") or {}).get("muted", False):
                 graph.append(
-                    f"[{index}:a:0]atrim=duration={scene_duration:.3f},asetpts=PTS-STARTPTS,"
+                    f"[{index}:a:0]atrim=duration={scene_duration:.6f},asetpts=PTS-STARTPTS,"
                     f"aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
-                    f"apad,atrim=duration={scene_duration:.3f}[a{index}]"
+                    f"apad,atrim=duration={scene_duration:.6f}[a{index}]"
                 )
             else:
                 graph.append(
-                    f"anullsrc=r=48000:cl=stereo,atrim=duration={scene_duration:.3f},"
+                    f"anullsrc=r=48000:cl=stereo,atrim=duration={scene_duration:.6f},"
                     f"asetpts=PTS-STARTPTS[a{index}]"
                 )
-            audio_labels.append(f"[a{index}]")
-        graph.append(f"{''.join(video_labels)}{''.join(audio_labels)}concat=n={len(scenes)}:v=1:a=1[vcat][acat]")
+            audio_labels.append(f"a{index}")
+        if any(scene.get("transition_duration", 0) for scene in scenes):
+            video_output, video_frames = video_labels[0], video_frame_counts[0]
+            for index, scene in enumerate(scenes[:-1]):
+                next_video = video_labels[index + 1]
+                transition = scene.get("transition_to_next", {})
+                transition_duration = float(scene.get("transition_duration", 0) or 0)
+                transition_frames = int(scene.get("transition_frames", round(transition_duration * fps)) or 0)
+                timing_mode = scene.get("transition_timing_mode", transition.get("timing_mode", "overlap"))
+                next_frames = video_frame_counts[index + 1]
+                next_output = f"vout_{index}"
+                effect = {"crossfade": "fade", "dip_to_black": "fadeblack", "zoom_blur": "fade"}.get(transition.get("type"), transition.get("type", "fade"))
+                if transition_frames and timing_mode == "insert_slot":
+                    slot_frames = transition_frames
+                    slot_duration = slot_frames / fps
+                    from_main_source, from_hold_source = f"vmain_src_{index}", f"vhold_src_{index}"
+                    to_hold_source, to_main_source = f"vto_hold_src_{index}", f"vto_main_src_{index}"
+                    graph.append(f"[{video_output}]split=2[{from_main_source}][{from_hold_source}]")
+                    graph.append(f"[{next_video}]split=2[{to_hold_source}][{to_main_source}]")
+                    from_main, to_main = f"vmain_{index}", f"vto_main_{index}"
+                    graph.append(f"[{from_main_source}]{video_normalizer}[{from_main}]")
+                    graph.append(f"[{to_main_source}]{video_normalizer}[{to_main}]")
+                    from_hold, to_hold = f"hold_from_{index}", f"hold_to_{index}"
+                    graph.append(
+                        f"[{from_hold_source}]trim=start_frame={video_frames - 1}:end_frame={video_frames},setpts=PTS-STARTPTS,"
+                        f"tpad=stop_mode=clone:stop_duration={slot_duration:.9f},fps={fps},trim=end_frame={slot_frames},"
+                        f"{video_normalizer}[{from_hold}]"
+                    )
+                    graph.append(
+                        f"[{to_hold_source}]trim=start_frame=0:end_frame=1,setpts=PTS-STARTPTS,"
+                        f"tpad=stop_mode=clone:stop_duration={slot_duration:.9f},fps={fps},trim=end_frame={slot_frames},"
+                        f"{video_normalizer}[{to_hold}]"
+                    )
+                    slot = f"vslot_{index}"
+                    if transition.get("type") == "dip_to_black":
+                        from_frames = (slot_frames + 1) // 2
+                        to_frames = slot_frames - from_frames
+                        from_part, to_part = f"vdip_from_{index}", f"vdip_to_{index}"
+                        graph.append(f"[{from_hold}]fade=t=out:st=0:d={from_frames / fps:.9f},trim=end_frame={from_frames},{video_normalizer}[{from_part}]")
+                        graph.append(f"[{to_hold}]fade=t=in:st=0:d={to_frames / fps:.9f},trim=end_frame={to_frames},{video_normalizer}[{to_part}]")
+                        graph.append(f"[{from_part}][{to_part}]concat=n=2:v=1:a=0,trim=end_frame={slot_frames},setpts=PTS-STARTPTS,{video_normalizer}[{slot}]")
+                    else:
+                        graph.append(
+                            f"[{from_hold}][{to_hold}]xfade=transition={effect}:duration={slot_duration:.9f}:offset=0,"
+                            f"trim=end_frame={slot_frames},setpts=PTS-STARTPTS,{video_normalizer}[{slot}]"
+                        )
+                    composed_frames = video_frames + slot_frames + next_frames
+                    graph.append(
+                        f"[{from_main}][{slot}][{to_main}]concat=n=3:v=1:a=0,"
+                        f"trim=end_frame={composed_frames},setpts=PTS-STARTPTS,{video_normalizer}[{next_output}]"
+                    )
+                    video_frames = composed_frames
+                elif transition_frames:
+                    # ponytail: legacy Zoom Blur maps to Crossfade until renderer supports blur.
+                    offset = (video_frames - transition_frames) / fps
+                    composed_frames = video_frames + next_frames - transition_frames
+                    graph.append(
+                        f"[{video_output}][{next_video}]xfade=transition={effect}:duration={transition_frames / fps:.9f}:offset={offset:.9f},"
+                        f"trim=end_frame={composed_frames},setpts=PTS-STARTPTS,{video_normalizer}[{next_output}]"
+                    )
+                    video_frames = composed_frames
+                else:
+                    composed_frames = video_frames + next_frames
+                    graph.append(f"[{video_output}][{next_video}]concat=n=2:v=1:a=0,trim=end_frame={composed_frames},setpts=PTS-STARTPTS,{video_normalizer}[{next_output}]")
+                    video_frames = composed_frames
+                video_output = next_output
+            audio_output = _compose_scene_audio(graph, scenes, audio_labels, "render")
+        else:
+            graph.append(f"{''.join('[' + label + ']' for label in video_labels)}{''.join('[' + label + ']' for label in audio_labels)}concat=n={len(scenes)}:v=1:a=1[vcat][acat]")
+            video_output, audio_output = "vcat", "acat"
         if audio_filters:
-            graph.append(f"[acat]{','.join(audio_filters)}[aout]")
+            graph.append(f"[{audio_output}]{','.join(audio_filters)}[aout]")
             output_maps.extend(["-map", "[aout]"])
         else:
-            output_maps.extend(["-map", "[acat]"])
+            output_maps.extend(["-map", f"[{audio_output}]"])
         if use_ass:
-            graph.append(f"[vcat]ass='{_ass_escape(subtitle)}'[vout]")
+            graph.append(f"[{video_output}]ass='{_ass_escape(subtitle)}'[vout]")
             output_maps.extend(["-map", "[vout]"])
         else:
-            output_maps.extend(["-map", "[vcat]"])
+            output_maps.extend(["-map", f"[{video_output}]"])
         filter_args = ["-filter_complex", ";".join(graph)]
     else:
         scene = scenes[0]
@@ -901,7 +1172,7 @@ def render(source, clip, edit, segments, job_id, cancel, progress, has_audio=Tru
         if audio_filters:
             output_maps.extend(["-af", ",".join(audio_filters)])
     command = [
-        *input_args, *filter_args, "-t", f"{duration:.3f}", *output_maps,
+        *input_args, *filter_args, "-t", f"{duration:.6f}", *output_maps,
         *video_encoder, "-r", str(fps), "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2", "-movflags", "+faststart",
         "-map_metadata", "-1", "-progress", "pipe:1", "-stats_period", "0.5", "-nostats", str(target),
@@ -910,7 +1181,7 @@ def render(source, clip, edit, segments, job_id, cancel, progress, has_audio=Tru
     process = None
     succeeded = False
     try:
-        with error_log.open("wb") as stderr:
+        with error_log.open("w+b") as stderr:
             process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=stderr, text=True, bufsize=1)
             for line in process.stdout:
                 if cancel.is_set():

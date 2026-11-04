@@ -564,7 +564,7 @@ dialog.confirm-dialog::backdrop{background:#10241d88;backdrop-filter:blur(3px)}
 .youtube-video-info span,.youtube-video-info small{color:var(--muted);font-size:var(--type-meta);line-height:var(--line-height-meta)}
 .youtube-video-info a,.youtube-reference-card>a{color:var(--green);font-size:var(--type-meta);font-weight:var(--weight-medium)}
 .youtube-timestamp-grid .field small{color:var(--muted);font-size:var(--type-meta);line-height:var(--line-height-meta)}
-.youtube-timestamp-grid>.button{min-height:44px;border-radius:var(--radius-control,8px);white-space:normal;text-align:center}
+.youtube-timestamp-grid>.button{align-self:center;min-height:44px;border-radius:var(--radius-control,8px);white-space:normal;text-align:center}
 .timestamp-validation{display:flex;align-items:flex-start;gap:8px;padding:10px 12px;border:1px solid var(--line);border-left:3px solid var(--red);border-radius:9px;background:var(--surface-alt);color:var(--danger);font-size:var(--type-meta);line-height:var(--line-height-body)}
 .timestamp-validation>svg{flex:none;margin-top:1px}
 .timestamp-validation.valid{border-left-color:var(--green);background:var(--green-soft);color:var(--green-dark)}

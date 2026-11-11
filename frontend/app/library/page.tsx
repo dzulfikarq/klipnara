@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { ChangeEvent, useEffect, useMemo, useState } from "react";
-import { AudioLines, Check, ChevronLeft, ChevronRight, Download, ExternalLink, Film, Heart, Image, LoaderCircle, Music2, Play, Search, Trash2, Upload, Video, X } from "lucide-react";
+import { AlertCircle, AudioLines, Check, ChevronLeft, ChevronRight, Download, ExternalLink, Film, Heart, Image, LoaderCircle, Music2, Play, Search, Trash2, Upload, Video, X } from "lucide-react";
 import { API, formatBytes, formatDuration, request } from "@/lib/api";
 
 type Tab = "stock" | "video" | "image" | "audio" | "favorites";
@@ -250,7 +250,7 @@ export default function AssetLibraryPage() {
 
   return <>
     <div className="page-intro asset-library-intro"><div className="eyebrow">LOCAL-FIRST MEDIA</div><h1>Asset Library</h1><p>Cari footage pilihan, kelola media lokal, dan gunakan ulang tanpa menyalin file per draft.</p></div>
-    {error && <div className="notice notice-error">{error}<button className="icon-button" onClick={() => setError("")} aria-label="Tutup pesan"><X size={14}/></button></div>}
+    {error && <div className="notice notice-error asset-library-error" role="alert"><AlertCircle size={18} aria-hidden="true"/><span>{error}</span><button type="button" className="icon-button" onClick={() => setError("")} aria-label="Tutup pesan error"><X size={14}/></button></div>}
     {notice && <div className="notice notice-success">{notice}<button className="icon-button" onClick={() => setNotice("")} aria-label="Tutup pesan"><X size={14}/></button></div>}
     <section className="asset-storage panel">
       <div className="asset-storage-heading"><span className="asset-storage-icon"><Film size={17}/></span><div><strong>Penyimpanan lokal</strong><small>{storage ? `${formatBytes(storage.bytes)} dipakai library · ${formatBytes(storage.free_bytes)} ruang kosong` : "Memuat penggunaan storage…"}</small></div></div>

@@ -1016,6 +1016,72 @@ def _audio_filters(edit, duration):
     return filters
 
 
+def _camera_component_expression(keyframes, field, interpolation, fallback, frame="n"):
+    if not keyframes:
+        return f"{float(fallback):.12g}"
+    ordered = sorted(keyframes, key=lambda item: item["frame"])
+    expression = f"{float(ordered[-1][field]):.12g}"
+    for start, end in reversed(list(zip(ordered, ordered[1:]))):
+        if interpolation == "hold":
+            value = f"{float(start[field]):.12g}"
+        else:
+            progress = f"(({frame}-{start['frame']})/{end['frame'] - start['frame']})"
+            if interpolation == "smooth":
+                progress = f"({progress})*({progress})*(3-2*({progress}))"
+            value = f"({float(start[field]):.12g}+({float(end[field]) - float(start[field]):.12g})*{progress})"
+        expression = f"if(lt({frame},{end['frame']}),{value},{expression})"
+    first = ordered[0]
+    if first["frame"]:
+        expression = f"if(lt({frame},{first['frame']}),{float(first[field]):.12g},{expression})"
+    return expression
+
+
+def _camera_filters(edit, scene, width, height, fps, source_width, source_height):
+    camera = edit.get("camera") or {}
+    if not camera.get("enabled"):
+        crop_x, crop_y = float(edit.get("crop_x", 50)), float(edit.get("crop_y", 50))
+        return [
+            f"scale={width}:{height}:force_original_aspect_ratio=increase",
+            f"crop={width}:{height}:(in_w-out_w)*{crop_x / 100:.4f}:(in_h-out_h)*{crop_y / 100:.4f}",
+            "setsar=1", f"fps={fps}",
+        ]
+    scene_camera_id = scene["id"]
+    if edit.get("scene_mode") != "multi":
+        stored_scenes = edit.get("scenes") or []
+        scene_camera_id = stored_scenes[0].get("id", scene_camera_id) if stored_scenes else scene_camera_id
+    scene_camera = camera.get("scenes", {}).get(scene_camera_id, {})
+    keyframes = scene_camera.get("keyframes", [])
+    interpolation = camera.get("interpolation", "smooth")
+    expressions = {
+        field: _camera_component_expression(
+            keyframes, field, interpolation,
+            (float(edit.get("crop_x", 50)) if field == "x" else float(edit.get("crop_y", 50)) if field == "y" else 1),
+            frame="on",
+        )
+        for field in ("x", "y", "zoom")
+    }
+    source_aspect, output_aspect = source_width / source_height, width / height
+    if source_aspect > output_aspect:
+        canvas_width, canvas_height = source_width, math.ceil(source_width / output_aspect)
+        content_width, content_height = canvas_width, canvas_width / source_aspect
+    else:
+        canvas_width, canvas_height = math.ceil(source_height * output_aspect), source_height
+        content_width, content_height = canvas_height * source_aspect, canvas_height
+    pad_x, pad_y = (canvas_width - content_width) / 2, (canvas_height - content_height) / 2
+    base_zoom = max(canvas_width / content_width, canvas_height / content_height)
+    return [
+        f"fps={fps}",
+        f"scale={canvas_width}:{canvas_height}:force_original_aspect_ratio=decrease",
+        "setsar=1",
+        f"pad={canvas_width}:{canvas_height}:(ow-iw)/2:(oh-ih)/2",
+        f"zoompan=z='{base_zoom:.12g}*({expressions['zoom']})':"
+        f"x='{pad_x:.12g}+max(0,{content_width:.12g}-iw/zoom)*({expressions['x']})/100':"
+        f"y='{pad_y:.12g}+max(0,{content_height:.12g}-ih/zoom)*({expressions['y']})/100':"
+        f"d=1:s={width}x{height}:fps={fps}",
+        "setsar=1",
+    ]
+
+
 def render(source, clip, edit, segments, job_id, cancel, progress, has_audio=True):
     ffmpeg = executable("ffmpeg", "FFMPEG_PATH")
     resolution = edit.get("resolution", "720")
@@ -1027,6 +1093,10 @@ def render(source, clip, edit, segments, job_id, cancel, progress, has_audio=Tru
     if not scenes or not math.isfinite(duration) or duration <= 0:
         raise MediaError("Clip needs at least one valid scene.")
     video_encoder = _video_encoder(ffmpeg, resolution, quality)
+    camera_enabled = bool((edit.get("camera") or {}).get("enabled"))
+    source_info = probe(source) if camera_enabled else None
+    source_width = source_info["width"] if source_info else None
+    source_height = source_info["height"] if source_info else None
     target = CLIP_DIR / f"{clip['id']}-{job_id}.mp4"
     crop_x, crop_y = float(edit.get("crop_x", 50)), float(edit.get("crop_y", 50))
     audio_filters = _audio_filters(edit, duration)
@@ -1052,11 +1122,10 @@ def render(source, clip, edit, segments, job_id, cancel, progress, has_audio=Tru
             frame_count = max(1, math.floor(scene_duration * fps + 1e-6))
             video_frame_counts.append(frame_count)
             input_args.extend(["-ss", f"{scene['source_start']:.6f}", "-t", f"{scene_duration:.6f}", "-i", str(source)])
+            camera_filters = _camera_filters(edit, scene, width, height, fps, source_width, source_height)
             graph.append(
                 f"[{index}:v:0]trim=duration={scene_duration:.6f},setpts=PTS-STARTPTS,"
-                f"scale={width}:{height}:force_original_aspect_ratio=increase,"
-                f"crop={width}:{height}:(in_w-out_w)*{crop_x / 100:.4f}:(in_h-out_h)*{crop_y / 100:.4f},"
-                f"setsar=1,fps={fps},tpad=stop_mode=clone:stop_duration=1,"
+                f"{','.join(camera_filters)},tpad=stop_mode=clone:stop_duration=1,"
                 f"trim=end_frame={frame_count},setpts=PTS-STARTPTS,format=yuv420p,settb=AVTB[v{index}]"
             )
             video_labels.append(f"v{index}")
@@ -1162,11 +1231,9 @@ def render(source, clip, edit, segments, job_id, cancel, progress, has_audio=Tru
             output_maps.extend(["-map", "1:a:0"])
         else:
             output_maps.extend(["-map", "0:a?"])
-        filters = [
-            f"scale={width}:{height}:force_original_aspect_ratio=increase",
-            f"crop={width}:{height}:(in_w-out_w)*{crop_x / 100:.4f}:(in_h-out_h)*{crop_y / 100:.4f}",
-            "setsar=1", f"fps={fps}",
-        ]
+        filters = _camera_filters(edit, scene, width, height, fps, source_width, source_height)
+        if camera_enabled:
+            filters[:0] = [f"trim=duration={scene_duration:.6f}", "setpts=PTS-STARTPTS"]
         if use_ass:
             filters.append(f"ass='{_ass_escape(subtitle)}'")
         output_maps.extend(["-map", "0:v:0", "-vf", ",".join(filters)])

@@ -19,7 +19,7 @@ from typing import Literal
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .config import CLIP_DIR, DATA_DIR, LEGACY_CLIP_DIR, LEGACY_SOURCE_DIR, MAX_UPLOAD_BYTES, MIN_FREE_BYTES, MOOD_DIR, SOURCE_DIR, WORK_DIR
 from .db import connect, init_db, unpack
@@ -151,6 +151,27 @@ class ClipScene(BaseModel):
     role: Literal["hook", "body", "ending"] = "body"
 
 
+class ClipCameraKeyframe(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    frame: int = Field(strict=True, ge=0, le=10_000_000)
+    x: float = Field(ge=0, le=100, allow_inf_nan=False)
+    y: float = Field(ge=0, le=100, allow_inf_nan=False)
+    zoom: float = Field(ge=1, le=2, allow_inf_nan=False)
+
+
+class ClipSceneCamera(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    keyframes: list[ClipCameraKeyframe] = Field(default_factory=list, max_length=500)
+
+
+class ClipCameraSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    interpolation: Literal["hold", "linear", "smooth"] = "smooth"
+    scenes: dict[str, ClipSceneCamera] = Field(default_factory=dict, max_length=MAX_SCENES)
+
+
 SceneTransitionType = Literal[
     "none", "crossfade", "dip_to_black", "zoom_blur",
     "wipeleft", "wiperight", "wipeup", "wipedown",
@@ -216,6 +237,7 @@ class ClipEdit(BaseModel):
     scene_mode: Literal["single", "multi"] | None = None
     scenes: list[ClipScene] | None = Field(default=None, max_length=MAX_SCENES)
     transitions: dict[str, ClipSceneTransition] | None = Field(default=None, max_length=MAX_SCENES - 1)
+    camera: ClipCameraSettings | None = None
     subtitle_enabled: bool | None = None
     subtitle_mode: Literal["off", "manual", "auto", "import"] | None = None
     subtitle_segments: list[SubtitleSegment] | None = Field(default=None, max_length=500)
@@ -1518,7 +1540,7 @@ def edit_clip(clip_id: str, body: ClipEdit):
             "subtitle_alignment", "subtitle_caption_width", "subtitle_safe_margin", "subtitle_outline", "subtitle_shadow",
             "subtitle_background", "subtitle_overrides",
             "style", "resolution", "crop_x", "crop_y", "subtitle_size", "subtitle_position", "subtitle_color", "audio",
-            "title_overlay", "fps", "quality",
+            "title_overlay", "fps", "quality", "camera",
         )):
             raise HTTPException(422, "Scene, subtitle, audio, and title settings cannot be null.")
         defaults = {
@@ -1559,6 +1581,7 @@ def edit_clip(clip_id: str, body: ClipEdit):
             changes["subtitle_timebase"] = "source"
             next_edit.update(changes)
         scenes = next_edit.get("scenes")
+        ordered_scenes = sorted(scenes or [], key=lambda scene: scene["order"])
         if scenes is not None:
             scenes = [{**scene, "role": scene.get("role", "body")} for scene in scenes]
             changes["scenes"] = scenes
@@ -1571,7 +1594,6 @@ def edit_clip(clip_id: str, body: ClipEdit):
                 raise HTTPException(422, f"Scene count must be between 1 and {MAX_SCENES}.")
             if scene_mode == "single" and len(scenes) != 1:
                 raise HTTPException(422, "Single Scene mode accepts exactly one scene.")
-            ordered_scenes = sorted(scenes, key=lambda scene: scene["order"])
             if [scene["order"] for scene in ordered_scenes] != list(range(len(ordered_scenes))):
                 raise HTTPException(422, "Scene order must be unique and contiguous from zero.")
             if len({scene["id"] for scene in scenes}) != len(scenes):
@@ -1584,6 +1606,40 @@ def edit_clip(clip_id: str, body: ClipEdit):
                 if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end > source_duration or too_short:
                     message = f"Each Multi-Scene interval must be at least {MIN_SCENE_SECONDS:.1f}s and stay within source duration." if scene_mode == "multi" else "Single Scene interval must stay within source duration."
                     raise HTTPException(422, message)
+        camera_settings = next_edit.get("camera")
+        if camera_settings is not None:
+            try:
+                camera_settings = ClipCameraSettings.model_validate(camera_settings).model_dump()
+            except ValidationError as exc:
+                raise HTTPException(422, f"Invalid camera configuration: {exc}") from None
+            camera_scenes = ordered_scenes if scene_mode == "multi" else [{
+                "id": (ordered_scenes[0]["id"] if ordered_scenes else f"scene-{clip_id}"),
+                "source_start": float(clip["start"]) + float(next_edit.get("trim_start", 0)),
+                "source_end": float(clip["start"]) + float(next_edit.get("trim_end", clip["end"] - clip["start"])),
+            }]
+            scene_ranges = {scene["id"]: scene for scene in camera_scenes}
+            if any(not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", scene_id) for scene_id in camera_settings["scenes"]):
+                raise HTTPException(422, "Camera scene IDs must be valid stable scene IDs.")
+            unknown_scenes = set(camera_settings["scenes"]) - set(scene_ranges)
+            if unknown_scenes:
+                raise HTTPException(422, "Camera data references a scene that no longer exists.")
+            camera_fps = int(next_edit.get("fps", 30))
+            keyframe_ids = set()
+            for scene_id, scene_camera in camera_settings["scenes"].items():
+                max_frame = math.floor((scene_ranges[scene_id]["source_end"] - scene_ranges[scene_id]["source_start"]) * camera_fps + 1e-6)
+                frames = [item["frame"] for item in scene_camera["keyframes"]]
+                ids = [item["id"] for item in scene_camera["keyframes"]]
+                if len(frames) != len(set(frames)):
+                    raise HTTPException(422, f"Camera keyframe frames must be unique in scene {scene_id}.")
+                if any(frame >= max_frame for frame in frames):
+                    raise HTTPException(422, f"Camera keyframe in scene {scene_id} falls outside its frame-aligned duration.")
+                if any(keyframe_id in keyframe_ids for keyframe_id in ids) or len(ids) != len(set(ids)):
+                    raise HTTPException(422, "Camera keyframe IDs must be unique.")
+                keyframe_ids.update(ids)
+                scene_camera["keyframes"].sort(key=lambda item: item["frame"])
+            next_edit["camera"] = camera_settings
+            if "camera" in changes:
+                changes["camera"] = camera_settings
         transition_scenes = ordered_scenes if scene_mode == "multi" and scenes else scenes[:1] if scenes else []
         normalized_transitions = normalize_scene_transitions(transition_scenes, next_edit.get("transitions", {}))
         previous_scene_list = edit.get("scenes") or []

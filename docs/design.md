@@ -123,6 +123,10 @@ Multi-Scene shows a keyboard-accessible Transition Slot at each scene join: acti
 
 Trim, Crop & Focus, Subtitle & Translation, and Audio/Title/Export use native `<details>/<summary>` disclosures. Save state follows the existing JSON snapshot/PATCH flow: **Saving**, **Save failed**, **Unsaved changes**, or **Saved** only after success. Keep review/render/publish gates and serialized autosave unchanged.
 
+Camera & Reframe stays inside the shared Clip Editor. Keep Dynamic Reframing opt-in so old projects retain their manual crop; show position and camera zoom separately from timeline zoom. Pointer drag works with mouse and touch, while keyframe diamonds stay selectable on the scene-local timeline. Keep Hold/Linear/Smooth under a compact advanced disclosure. Camera keyframes follow stable scene IDs and integer local frames through split, trim, cut, duplicate, reorder, and delete. Source framing moves beneath output-space titles and captions; browser preview is a visual approximation of FFmpeg, not a pixel-match guarantee.
+
+Keep Camera & Reframe and Crop/Audio/Export full-width within the editor controls. Keep camera values beside their sliders, selected-keyframe state visible, Add Keyframe primary, and deletion subdued. Group Crop, Output, Audio, and Title/Overlay with subtle dividers; disabling title overlay disables its controls without clearing values. Composition preview uses centered 9:16 framing, source/render choice, local status, scene/output metadata, accessible transport, and a concise browser-versus-FFmpeg note. Preserve sticky desktop preview.
+
 Word Pop is a caption type, not a preset. Show one timed word at a time and leave silence gaps empty. Keep each cue editable and explicitly reviewed before Word Pop can activate/render. Changing cue text or bounds clears review without discarding words. Presets change appearance only. Preview honors `prefers-reduced-motion`; final FFmpeg ASS uses one positioned event per word.
 
 ### Mood Quotes

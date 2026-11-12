@@ -102,7 +102,7 @@ Second cue
     try:
         render_subtitle_segments({"id": "word-pop", "start": 0, "end": 2}, missing_timing_edit, [], "a" * 64)
     except MediaError as exc:
-        assert "word-level" in str(exc)
+        assert "word timestamps" in str(exc).lower()
     else:
         raise AssertionError("Word Pop accepted cue-only timing")
     payload = {"steps": [{"content": [{"annotations": [
@@ -145,6 +145,7 @@ Second cue
     edit["subtitle_tracks"][0]["segments"][0]["text"] = "Edited"
     assert render_subtitle_segments(clip, edit, [], "a" * 64)[0]["text"] == "Edited"
     edit["subtitle_tracks"][0]["composition_signature"] = "stale"
+    edit["subtitle_tracks"][0]["composition_fingerprint"] = "0" * 64
     try:
         render_subtitle_segments(clip, edit, [], "a" * 64)
     except MediaError as exc:

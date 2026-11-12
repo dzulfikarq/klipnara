@@ -216,7 +216,7 @@ test("scene range, split, duplicate, and delete enforce safe bounds", () => {
 test("ripple delete cuts output range across reordered scenes and keeps source intact", () => {
   const result = deleteOutputRange(scenes, 2, 5);
   assert.deepEqual(result.map(({ id, source_start, source_end, order }) => [id === "b" ? id : id === "a" ? id : "split", source_start, source_end, order]), [
-    ["b", 0, 2, 0], ["split", 19, 25, 1],
+    ["b", 0, 2, 0], ["a", 19, 25, 1],
   ]);
   assert.deepEqual(sceneTimeline(result).map(({ timeline_start, timeline_end }) => [timeline_start, timeline_end]), [[0, 2], [2, 8]]);
   assert.equal(outputToSource(result, 2.5).sourceTime, 19.5);

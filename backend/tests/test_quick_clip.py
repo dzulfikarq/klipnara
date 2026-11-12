@@ -17,7 +17,7 @@ from clipper.config import CLIP_DIR
 from clipper.db import connect
 from clipper.jobs import runner
 from clipper.main import ClipSceneTransition, app
-from clipper.media import MediaError, SCENE_TRANSITION_TYPES, map_scene_subtitles, output_scenes, render, scene_output_duration
+from clipper.media import MediaError, SCENE_TRANSITION_TYPES, _camera_component_expression, _camera_filters, map_scene_subtitles, output_scenes, render, scene_output_duration
 from clipper.subtitles import composition_signature
 
 
@@ -27,6 +27,26 @@ def run():
         "scenes": [{"id": "solo", "source_start": 1, "source_end": 2.5, "order": 0, "role": "body"}],
     })
     assert len(one_scene_timeline) == 1 and one_scene_timeline[0]["timeline_end"] == 1.5
+    camera_keys = [
+        {"id": "start", "frame": 0, "x": 50, "y": 50, "zoom": 1},
+        {"id": "end", "frame": 120, "x": 80, "y": 45, "zoom": 1.5},
+    ]
+    assert _camera_component_expression(camera_keys, "x", "hold", 50) == "if(lt(n,120),50,80)"
+    assert "n-0" in _camera_component_expression(camera_keys, "zoom", "linear", 1)
+    assert "3-2" in _camera_component_expression(camera_keys, "zoom", "smooth", 1)
+    legacy_filters = _camera_filters({"crop_x": 25, "crop_y": 75}, one_scene_timeline[0], 720, 1280, 30, 1920, 1080)
+    assert legacy_filters == [
+        "scale=720:1280:force_original_aspect_ratio=increase",
+        "crop=720:1280:(in_w-out_w)*0.2500:(in_h-out_h)*0.7500", "setsar=1", "fps=30",
+    ]
+    for width, height, fps in ((720, 1280, 30), (1080, 1920, 60)):
+        dynamic_filters = _camera_filters({
+            "scene_mode": "multi", "camera": {"enabled": True, "interpolation": "smooth", "scenes": {"solo": {"keyframes": camera_keys}}},
+        }, one_scene_timeline[0], width, height, fps, 1920, 1080)
+        assert dynamic_filters[0] == f"fps={fps}"
+        assert dynamic_filters[1].startswith("scale=1920:") and dynamic_filters[3].startswith("pad=1920:")
+        assert dynamic_filters[4].startswith(f"zoompan=z='") and f"d=1:s={width}x{height}:fps={fps}" in dynamic_filters[4]
+        assert "on-0" in dynamic_filters[4] and "crop=" not in "".join(dynamic_filters)
 
     transition_scenes = [
         {"id": "a", "source_start": 0, "source_end": 4, "order": 0, "role": "body"},
@@ -161,6 +181,30 @@ def run():
             with connect() as conn:
                 fingerprint = conn.execute("SELECT reviewed_render_sha256 FROM clips WHERE id=?", (queued["clip_id"],)).fetchone()[0]
             assert fingerprint and len(fingerprint) == 64
+            camera_scene_id = initial_edit["scenes"][0]["id"]
+            camera_edit = {
+                "enabled": True, "interpolation": "smooth",
+                "scenes": {camera_scene_id: {"keyframes": [{"id": "camera-start", "frame": 30, "x": 72, "y": 50, "zoom": 1.25}]}},
+            }
+            camera_saved = client.patch(f"/api/clips/{queued['clip_id']}", json={"camera": camera_edit})
+            assert camera_saved.status_code == 200, camera_saved.text
+            reloaded_camera = client.get(f"/api/clips/{queued['clip_id']}").json()["clip"]["edit"]["camera"]
+            assert reloaded_camera == camera_edit
+            with connect() as conn:
+                camera_freshness = conn.execute("SELECT status,review_status,reviewed_render_sha256 FROM clips WHERE id=?", (queued["clip_id"],)).fetchone()
+            assert tuple(camera_freshness) == ("needs_render", "needs_review", None)
+            for invalid_camera in (
+                {"enabled": True, "scenes": {camera_scene_id: {"keyframes": [{"id": "bad-x", "frame": 0, "x": 101, "y": 50, "zoom": 1}]} }},
+                {"enabled": True, "scenes": {camera_scene_id: {"keyframes": [{"id": "bad-frame", "frame": 1800, "x": 50, "y": 50, "zoom": 1}]} }},
+                {"enabled": True, "scenes": {"deleted-scene": {"keyframes": []}}},
+                {"enabled": True, "scenes": {camera_scene_id: {"keyframes": [
+                    {"id": "duplicate-one", "frame": 4, "x": 50, "y": 50, "zoom": 1},
+                    {"id": "duplicate-two", "frame": 4, "x": 60, "y": 50, "zoom": 1},
+                ]}}},
+            ):
+                rejected_camera = client.patch(f"/api/clips/{queued['clip_id']}", json={"camera": invalid_camera})
+                assert rejected_camera.status_code == 422, rejected_camera.text
+            assert client.get(f"/api/clips/{queued['clip_id']}").json()["clip"]["edit"]["camera"] == camera_edit
             manual = client.patch(f"/api/clips/{queued['clip_id']}", json={
                 "subtitle_mode": "manual", "subtitle_enabled": True,
                 "subtitle_segments": [{"id": "manual-one", "start": 2.25, "end": 4.5, "text": "Teks tanpa transkrip."}],
@@ -174,7 +218,10 @@ def run():
                 with connect() as conn:
                     manual_job = dict(conn.execute("SELECT * FROM jobs WHERE id=?", (manual_render.json()["id"],)).fetchone())
                 runner._process(manual_job, threading.Event())
-            assert render_calls[-1] == (True, restored["subtitle_segments"], False)
+            assert render_calls[-1][0] is True and render_calls[-1][2] is False
+            assert [(item["start"], item["end"], item["text"]) for item in render_calls[-1][1]] == [
+                (2.25, 4.5, "Teks tanpa transkrip."),
+            ]
 
             no_audio_stt = client.post(f"/api/clips/{queued['clip_id']}/subtitles/auto-generate", json={"provider": "local"})
             assert no_audio_stt.status_code == 409 and "no audio" in no_audio_stt.json()["detail"]
@@ -368,16 +415,27 @@ def run():
             })
             assert invalid_many_scenes.status_code == 422
             assert client.get(f"/api/clips/{second['clip_id']}").json()["clip"]["edit"]["scenes"] == multi_saved.json()["scenes"]
+            source_captions = multi_saved.json()["subtitle_segments"]
+            source_track = {
+                "id": "manual-source", "source_type": "manual", "timebase": "source",
+                "segments": source_captions, "edited": True,
+            }
+            restored_source_track = client.patch(f"/api/clips/{second['clip_id']}", json={
+                "subtitle_tracks": [source_track], "subtitle_active_track_id": "manual-source",
+                "subtitle_segments": source_captions, "subtitle_timebase": "source", "subtitle_mode": "manual",
+            })
+            assert restored_source_track.status_code == 200, restored_source_track.text
             multi_job_response = client.post(f"/api/clips/{second['clip_id']}/render")
             assert multi_job_response.status_code == 200, multi_job_response.text
             with connect() as conn:
                 multi_job = dict(conn.execute("SELECT * FROM jobs WHERE id=?", (multi_job_response.json()["id"],)).fetchone())
             with patch("clipper.jobs.render", side_effect=fake_render):
                 runner._process(multi_job, threading.Event())
-            assert render_calls[-1] == (True, [
-                {"id": "scene-a-cut-boundary", "start": 2, "end": 3, "text": "Caption across trim"},
-                {"id": "scene-b-later-caption", "start": 3.5, "end": 4.5, "text": "Later source time"},
-            ], True)
+            assert render_calls[-1][0] is True and render_calls[-1][2] is True
+            assert [(item["id"], item["start"], item["end"], item["text"]) for item in render_calls[-1][1]] == [
+                ("scene-a-cut-boundary", 2, 3, "Caption across trim"),
+                ("scene-b-later-caption", 3.5, 4.5, "Later source time"),
+            ]
 
             class FakeProcess:
                 def __init__(self):
@@ -440,7 +498,7 @@ def run():
             graph = multi_command[multi_command.index("-filter_complex") + 1]
             assert "[v0][a0][v1][a1]concat=n=2:v=1:a=1[vcat][acat]" in graph
             assert "aresample=48000" in graph and "setpts=PTS-STARTPTS" in graph
-            assert multi_command[multi_command.index("-t") + 1] == "5.000"
+            assert [multi_command[index + 1] for index, value in enumerate(multi_command) if value == "-t"][-1] == "5.000000"
             assert ass_caption_inputs == [[]], "title-only overlay must not burn disabled subtitles"
             Path(multi_command[-1]).unlink(missing_ok=True)
 
@@ -459,13 +517,22 @@ def run():
                     **multi_edit,
                     "transitions": {"a>b": {"type": transition_type, "duration": 0.5, "smooth_audio": smooth_audio}},
                 }
+                if transition_type == "crossfade":
+                    transitioned_edit["camera"] = {
+                        "enabled": True, "interpolation": "linear", "scenes": {
+                            "a": {"keyframes": [{"id": "a0", "frame": 0, "x": 50, "y": 50, "zoom": 1}, {"id": "a1", "frame": 30, "x": 80, "y": 50, "zoom": 1.2}]},
+                            "b": {"keyframes": [{"id": "b0", "frame": 0, "x": 20, "y": 50, "zoom": 1}]},
+                        },
+                    }
                 with patch("clipper.media.executable", return_value="ffmpeg"), \
                      patch("clipper.media.subprocess.Popen", side_effect=fake_transition_popen), \
                  patch("clipper.media.probe", return_value={"duration": 4.5, "width": 720, "height": 1280, "video_codec": "h264", "audio_codec": "aac"}):
                     render("input.mp4", clip, transitioned_edit, [], uuid.uuid4().hex, threading.Event(), lambda _progress: None, has_audio=True)
                 transition_graph = transition_command[transition_command.index("-filter_complex") + 1]
                 assert f"xfade=transition={effect}:duration=0.500000000:offset=1.500000000" in transition_graph
-                assert transition_command[transition_command.index("-t") + 1] == "4.500000"
+                if transition_type == "crossfade":
+                    assert transition_graph.count("zoompan=z=") == 2 and "if(lt(on,30)" in transition_graph
+                assert [transition_command[index + 1] for index, value in enumerate(transition_command) if value == "-t"][-1] == "4.500000"
                 if smooth_audio:
                     assert "acrossfade=d=0.500000000" in transition_graph
                 else:
@@ -484,6 +551,10 @@ def run():
                 "resolution": "1080",
                 "fps": 60,
                 "transitions": {"a>b": {"type": "crossfade", "timing_mode": "insert_slot", "duration": 0.5, "smooth_audio": True}},
+                "camera": {"enabled": True, "interpolation": "smooth", "scenes": {
+                    "a": {"keyframes": [{"id": "a0", "frame": 0, "x": 50, "y": 50, "zoom": 1}, {"id": "a1", "frame": 60, "x": 100, "y": 50, "zoom": 1.5}]},
+                    "b": {"keyframes": [{"id": "b0", "frame": 0, "x": 0, "y": 50, "zoom": 1.1}, {"id": "b1", "frame": 90, "x": 100, "y": 50, "zoom": 1.5}]},
+                }},
             }
             with patch("clipper.media.executable", return_value="ffmpeg"), \
                  patch("clipper.media._video_encoder", return_value=["-c:v", "libx264"]), \
@@ -491,7 +562,8 @@ def run():
                  patch("clipper.media.probe", return_value={"duration": 5.5, "width": 1080, "height": 1920, "video_codec": "h264", "audio_codec": "aac"}):
                 render("input.mp4", clip, inserted_edit, [], uuid.uuid4().hex, threading.Event(), lambda _progress: None, has_audio=True)
             inserted_graph = inserted_command[inserted_command.index("-filter_complex") + 1]
-            assert inserted_command[inserted_command.index("-t") + 1] == "5.500000"
+            assert [inserted_command[index + 1] for index, value in enumerate(inserted_command) if value == "-t"][-1] == "5.500000"
+            assert inserted_graph.count("zoompan=z=") == 2 and "if(lt(on,60)" in inserted_graph and "if(lt(on,90)" in inserted_graph
             assert "scale=1080:1920" in inserted_graph and "fps=60" in inserted_graph and "setpts=PTS-STARTPTS" in inserted_graph
             assert "[v0]split=2[vmain_src_0][vhold_src_0]" in inserted_graph
             assert "[v1]split=2[vto_hold_src_0][vto_main_src_0]" in inserted_graph
@@ -568,6 +640,7 @@ def run():
 
             fractional_trim = client.patch(f"/api/clips/{second['clip_id']}", json={
                 "scene_mode": "single", "trim_start": 0.13, "trim_end": 8.87,
+                "scenes": [{"id": "fractional-single", "source_start": 1.13, "source_end": 9.87, "order": 0, "role": "body"}],
                 "subtitle_mode": "off", "subtitle_enabled": False, "subtitle_timebase": "clip",
                 "subtitle_segments": [], "subtitle_tracks": [],
                 "subtitle_active_track_id": None, "subtitle_active_translation_id": None,

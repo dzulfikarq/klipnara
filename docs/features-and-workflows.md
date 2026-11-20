@@ -110,6 +110,14 @@ Candidate AI clips and Quick Clips appear with source/candidate labels. Human re
 
 Render creates portrait H.264/AAC MP4. User can adjust trim, crop, subtitle mode, cue text/timing, caption mode/style, and preview with play/pause/seek. Single-scene subtitle times stay candidate-relative; Multi-Scene times use source seconds; output-time tracks bind to the current composition fingerprint. Source-time captions remap after reorder/cuts; stale output tracks cannot render. Subtitle edits autosave and restore on reopen. Old rendered MP4 remains until replacement succeeds.
 
+### Auto Creative Editing V1
+
+The shared Clip Editor offers Cinematic Survival, Outdoor Cooking, and Viral Fast Cut presets with a 0–100% visual-intensity control. Apply builds a local staged draft; source and saved `clips.edit_json` stay unchanged until **Simpan auto edit**. The staged browser preview uses candidate color matrix, camera keyframes, and Multi-Scene transitions. Confirmed edits enter existing undo/redo and autosave flows; color, camera, transition, and audio controls remain manually editable. **Reset preview** discards only staged candidate; **Reset color grade** restores neutral grade.
+
+Grading stores bounded `color_grade` values in `clips.edit_json` (brightness −0.1–0.1, contrast 0.8–1.25, saturation 0–1.5, temperature −10–10); older edits default to neutral. Browser SVG color matrix and FFmpeg `colorchannelmixer` use same matrix. Presets add deterministic, smooth zoom around existing camera focus; clips without framing keyframes default to center, and zoom increment stays at or below 0.1×. They add restrained Crossfade Overlap only on existing Multi-Scene joins and reuse `loudnorm`/`alimiter`. Single-Scene clips do not get invented cuts. Browser cannot preview final loudness processing, and color/render decoding can differ slightly.
+
+Auto framing has no semantic subject detector: center zoom cannot guarantee important subjects stay in frame. Preview first; adjust X/Y framing manually. No random motion, source-video mutation, new rendering pipeline, or copyright-protection claim.
+
 ### V2.8 subtitle workflow
 
 1. Choose **Transcribe** to queue local Whisper, Gemini, or OpenAI for the saved composition scene order/ranges. Local Whisper returns segment timing. Gemini requests word timestamps/speaker labels (maximum 30 minutes). OpenAI `gpt-transcribe` returns text only; users must time those cues manually.

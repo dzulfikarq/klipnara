@@ -200,6 +200,14 @@ class ClipAudioSettings(BaseModel):
     limiter: bool = False
 
 
+class ClipColorGrade(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    brightness: float = Field(default=0, ge=-0.1, le=0.1, allow_inf_nan=False)
+    contrast: float = Field(default=1, ge=0.8, le=1.25, allow_inf_nan=False)
+    saturation: float = Field(default=1, ge=0, le=1.5, allow_inf_nan=False)
+    temperature: float = Field(default=0, ge=-10, le=10, allow_inf_nan=False)
+
+
 class ClipTitleOverlay(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool = False
@@ -238,6 +246,7 @@ class ClipEdit(BaseModel):
     scenes: list[ClipScene] | None = Field(default=None, max_length=MAX_SCENES)
     transitions: dict[str, ClipSceneTransition] | None = Field(default=None, max_length=MAX_SCENES - 1)
     camera: ClipCameraSettings | None = None
+    color_grade: ClipColorGrade | None = None
     subtitle_enabled: bool | None = None
     subtitle_mode: Literal["off", "manual", "auto", "import"] | None = None
     subtitle_segments: list[SubtitleSegment] | None = Field(default=None, max_length=500)
@@ -1383,6 +1392,7 @@ def get_clip(clip_id: str):
     edit["transitions"] = normalize_scene_transitions(edit["scenes"], edit["transitions"])
     edit.setdefault("fps", 30)
     edit.setdefault("quality", "balanced")
+    edit["color_grade"] = {"brightness": 0, "contrast": 1, "saturation": 1, "temperature": 0, **(edit.get("color_grade") or {})}
     edit["audio"] = {"volume": 1, "muted": False, "fade_in": 0, "fade_out": 0, "normalize": False, "target_lufs": -18, "limiter": False, **(edit.get("audio") or {})}
     edit["title_overlay"] = {"enabled": False, "text": "", "font": "Arial", "size": 48, "color": "#ffffff", "position": 18, "duration": 3, "fade_in": 0.2, "fade_out": 0.2, **(edit.get("title_overlay") or {})}
     if "subtitle_mode" not in edit:
@@ -1539,13 +1549,14 @@ def edit_clip(clip_id: str, body: ClipEdit):
             "subtitle_animation_intensity", "subtitle_animation_duration",
             "subtitle_alignment", "subtitle_caption_width", "subtitle_safe_margin", "subtitle_outline", "subtitle_shadow",
             "subtitle_background", "subtitle_overrides",
-            "style", "resolution", "crop_x", "crop_y", "subtitle_size", "subtitle_position", "subtitle_color", "audio",
+            "style", "resolution", "crop_x", "crop_y", "subtitle_size", "subtitle_position", "subtitle_color", "audio", "color_grade",
             "title_overlay", "fps", "quality", "camera",
         )):
-            raise HTTPException(422, "Scene, subtitle, audio, and title settings cannot be null.")
+            raise HTTPException(422, "Scene, subtitle, color, audio, and title settings cannot be null.")
         defaults = {
             "audio": {"volume": 1, "muted": False, "fade_in": 0, "fade_out": 0, "normalize": False, "target_lufs": -18, "limiter": False},
             "title_overlay": {"enabled": False, "text": "", "font": "Arial", "size": 48, "color": "#ffffff", "position": 18, "duration": 3, "fade_in": 0.2, "fade_out": 0.2},
+            "color_grade": {"brightness": 0, "contrast": 1, "saturation": 1, "temperature": 0},
         }
         for key, values in defaults.items():
             if key in changes:

@@ -11,7 +11,7 @@ from urllib.error import HTTPError, URLError
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from clipper.analysis import RANK_SCHEMA, candidate_schema, parse_and_validate, parse_ranking, ranking_schema, token_bounded_chunks, transcript_chunks
-from clipper.media import MediaError, _audio_filters, _public_addresses, _write_ass, map_scene_subtitles, output_scenes, probe, transcript_cache_matches, transcription_config_key, transcription_model_id, transcribe
+from clipper.media import MediaError, _audio_filters, _color_grade_filters, _public_addresses, _write_ass, map_scene_subtitles, output_scenes, probe, transcript_cache_matches, transcription_config_key, transcription_model_id, transcribe
 from clipper.providers import ProviderError, _post, _timeout_seconds, analyze, check_local, count_prompt_tokens, local_limits
 
 
@@ -40,6 +40,13 @@ def run():
     assert (legacy_timeline[0]["source_start"], legacy_timeline[0]["source_end"], legacy_timeline[0]["duration"]) == (62, 65, 3)
     filters = _audio_filters({"audio": {"volume": 0.8, "normalize": True, "limiter": True, "fade_in": 1, "fade_out": 2}}, 10)
     assert filters == ["volume=0.800", "loudnorm=I=-18.0:TP=-1.5:LRA=11", "alimiter=limit=0.95", "afade=t=in:st=0:d=1.000", "afade=t=out:st=8.000:d=2.000"]
+    assert _color_grade_filters({}) == []
+    grade_filters = _color_grade_filters({"color_grade": {"brightness": 0.02, "contrast": 1.08, "saturation": 0.94, "temperature": -2}})
+    assert len(grade_filters) == 1 and grade_filters[0].startswith("colorchannelmixer=rr=")
+    assert "ra=" in grade_filters[0] and "bb=" in grade_filters[0]
+    neutral_saturation = _color_grade_filters({"color_grade": {"saturation": 0}})[0]
+    assert "rr=0.21300000:rg=0.71500000:rb=0.07200000" in neutral_saturation
+    assert _color_grade_filters({"color_grade": {"brightness": 9, "contrast": 9, "saturation": -4, "temperature": 50}}) == _color_grade_filters({"color_grade": {"brightness": 0.1, "contrast": 1.25, "saturation": 0, "temperature": 10}})
 
     no_audio_probe = {"format": {"format_name": "mov,mp4,m4a", "duration": "60"}, "streams": [{
         "codec_type": "video", "codec_name": "h264", "width": 720, "height": 1280,

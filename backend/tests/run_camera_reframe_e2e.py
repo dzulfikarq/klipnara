@@ -1,10 +1,12 @@
-"""Opt-in local E2E for 16:9 subject movement through Dynamic Reframing."""
+"""Opt-in synthetic export E2E for Dynamic Reframing and Auto Creative grading."""
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from unittest.mock import patch
 import uuid
@@ -38,9 +40,11 @@ def main():
     subprocess.run([
         ffmpeg, "-hide_banner", "-nostdin", "-y", "-f", "lavfi", "-i",
         "color=c=0x53725d:s=1920x1080:r=30:d=12", "-f", "lavfi", "-i",
-        "color=c=0xe3ba55:s=140x160:r=30:d=12", "-filter_complex",
-        f"[0:v][1:v]overlay=x='{move_subject}':y='{move_subject_y}':shortest=1",
-        "-an", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+        "color=c=0xe3ba55:s=140x160:r=30:d=12", "-f", "lavfi", "-i",
+        "sine=frequency=440:sample_rate=48000:duration=12", "-filter_complex",
+        f"[0:v][1:v]overlay=x='{move_subject}':y='{move_subject_y}':shortest=1[v]",
+        "-map", "[v]", "-map", "2:a:0", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+        "-c:a", "aac", "-b:a", "128k",
         "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(source_path),
     ], check=True, capture_output=True)
 
@@ -91,6 +95,8 @@ def main():
                     {"id": "caption-two", "start": 5.2, "end": 6.2, "text": "Synthetic return caption"},
                 ],
                 "title_overlay": {"enabled": True, "text": "CAMERA TEST", "size": 48, "position": 18, "duration": 3},
+                "color_grade": {"brightness": 0.02, "contrast": 1.08, "saturation": 0.94, "temperature": -2},
+                "audio": {"volume": 1, "muted": False, "fade_in": 0, "fade_out": 0, "normalize": True, "target_lufs": -18, "limiter": True},
                 "resolution": "720",
             }
             saved = client.patch(f"/api/clips/{clip_id}", json=edit)
@@ -98,7 +104,27 @@ def main():
             reloaded = client.get(f"/api/clips/{clip_id}").json()["clip"]["edit"]
             assert reloaded["camera"] == edit["camera"] and reloaded["subtitle_segments"] == edit["subtitle_segments"]
             assert reloaded["scenes"] == edit["scenes"] and reloaded["title_overlay"]["text"] == "CAMERA TEST"
+            assert reloaded["color_grade"] == edit["color_grade"] and reloaded["audio"] == edit["audio"]
 
+            baseline = client.patch(f"/api/clips/{clip_id}", json={
+                "color_grade": {"brightness": 0, "contrast": 1, "saturation": 1, "temperature": 0},
+                "camera": {**edit["camera"], "enabled": False},
+                "transitions": {},
+                "audio": {"volume": 1, "muted": False, "fade_in": 0, "fade_out": 0, "normalize": False, "target_lufs": -18, "limiter": False},
+            })
+            assert baseline.status_code == 200, baseline.text
+            baseline_job_response = client.post(f"/api/clips/{clip_id}/render")
+            assert baseline_job_response.status_code == 200, baseline_job_response.text
+            with connect() as conn:
+                baseline_job = dict(conn.execute("SELECT * FROM jobs WHERE id=?", (baseline_job_response.json()["id"],)).fetchone())
+            baseline_started = time.perf_counter()
+            runner._process(baseline_job, threading.Event())
+            baseline_seconds = time.perf_counter() - baseline_started
+            restored = client.patch(f"/api/clips/{clip_id}", json=edit)
+            assert restored.status_code == 200, restored.text
+            print(f"720p no-Auto-Creative baseline: {baseline_seconds:.2f}s")
+
+            auto_720_seconds = None
             for resolution in ("720", "1080"):
                 if resolution != "720":
                     changed = client.patch(f"/api/clips/{clip_id}", json={"resolution": resolution})
@@ -112,7 +138,9 @@ def main():
                 assert render_response.status_code == 200, render_response.text
                 with connect() as conn:
                     job = dict(conn.execute("SELECT * FROM jobs WHERE id=?", (render_response.json()["id"],)).fetchone())
+                render_started = time.perf_counter()
                 runner._process(job, threading.Event())
+                render_seconds = time.perf_counter() - render_started
                 with connect() as conn:
                     rendered = conn.execute("SELECT rendered_path,status,review_status,reviewed_render_sha256 FROM clips WHERE id=?", (clip_id,)).fetchone()
                 assert tuple(rendered[1:]) == ("completed", "needs_review", None), tuple(rendered)
@@ -122,6 +150,14 @@ def main():
                 width, height = (720, 1280) if resolution == "720" else (1080, 1920)
                 assert (metadata["width"], metadata["height"]) == (width, height), metadata
                 assert abs(metadata["duration"] - 11.2) < 0.3, metadata["duration"]
+                assert metadata["audio_codec"] == "aac", metadata
+                audio_stats = subprocess.run([
+                    ffmpeg, "-hide_banner", "-i", str(final), "-vn", "-af", "volumedetect", "-f", "null", "-",
+                ], capture_output=True, text=True, check=True).stderr
+                peak_match = re.search(r"max_volume:\s*(-?\d+(?:\.\d+)?) dB", audio_stats)
+                assert peak_match, audio_stats
+                audio_peak = float(peak_match.group(1))
+                assert -60 < audio_peak < 0, (resolution, audio_peak)
 
                 def frame_at(second):
                     return subprocess.run([
@@ -205,8 +241,12 @@ def main():
                 if resolution == "1080":
                     CLIP_DIR.mkdir(parents=True, exist_ok=True)
                     output_path.write_bytes(final.read_bytes())
-                print(f"Dynamic Reframing {resolution} E2E passed: {width}x{height}")
+                print(f"Auto Creative + Dynamic Reframing {resolution} E2E: {width}x{height}, {render_seconds:.2f}s, AAC peak {audio_peak:.1f} dBFS")
+                if resolution == "720":
+                    auto_720_seconds = render_seconds
             print(f"Synthetic E2E output: {output_path}")
+            overhead = auto_720_seconds - baseline_seconds
+            print(f"720p Auto Creative render overhead: {overhead:+.2f}s ({(overhead / baseline_seconds) * 100:+.0f}%)")
 
 
 if __name__ == "__main__":

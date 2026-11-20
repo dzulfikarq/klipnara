@@ -190,6 +190,18 @@ def run():
             assert camera_saved.status_code == 200, camera_saved.text
             reloaded_camera = client.get(f"/api/clips/{queued['clip_id']}").json()["clip"]["edit"]["camera"]
             assert reloaded_camera == camera_edit
+            color_grade = {"brightness": 0.02, "contrast": 1.08, "saturation": 0.94, "temperature": -2}
+            grade_saved = client.patch(f"/api/clips/{queued['clip_id']}", json={"color_grade": color_grade})
+            assert grade_saved.status_code == 200, grade_saved.text
+            assert client.get(f"/api/clips/{queued['clip_id']}").json()["clip"]["edit"]["color_grade"] == color_grade
+            for invalid_grade in (
+                {"brightness": 0.11},
+                {"temperature": 11},
+                {"contrast": 1, "extra": True},
+            ):
+                rejected_grade = client.patch(f"/api/clips/{queued['clip_id']}", json={"color_grade": invalid_grade})
+                assert rejected_grade.status_code == 422, rejected_grade.text
+            assert client.get(f"/api/clips/{queued['clip_id']}").json()["clip"]["edit"]["color_grade"] == color_grade
             with connect() as conn:
                 camera_freshness = conn.execute("SELECT status,review_status,reviewed_render_sha256 FROM clips WHERE id=?", (queued["clip_id"],)).fetchone()
             assert tuple(camera_freshness) == ("needs_render", "needs_review", None)

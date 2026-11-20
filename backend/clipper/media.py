@@ -1036,6 +1036,34 @@ def _camera_component_expression(keyframes, field, interpolation, fallback, fram
     return expression
 
 
+def _color_grade_filters(edit):
+    grade = edit.get("color_grade") or {}
+    brightness = max(-0.1, min(0.1, float(grade.get("brightness", 0))))
+    contrast = max(0.8, min(1.25, float(grade.get("contrast", 1))))
+    saturation = max(0, min(1.5, float(grade.get("saturation", 1))))
+    temperature = max(-10, min(10, float(grade.get("temperature", 0))))
+    if brightness == 0 and contrast == 1 and saturation == 1 and temperature == 0:
+        return []
+
+    luma = (0.213, 0.715, 0.072)
+    saturation_matrix = [
+        [(saturation if row == column else 0) + luma[column] * (1 - saturation) for column in range(3)]
+        for row in range(3)
+    ]
+    tint = abs(temperature) * 0.008 * (1 if temperature >= 0 else -1)
+    gains = (1 + tint, 1, 1 - tint)
+    scale = (1 + brightness) * contrast
+    offset = 0.5 * (1 - contrast)
+    rows = [
+        [value * scale * gains[row] for value in saturation_matrix[row]] + [offset * gains[row]]
+        for row in range(3)
+    ]
+    names = (("rr", "rg", "rb", "ra"), ("gr", "gg", "gb", "ga"), ("br", "bg", "bb", "ba"))
+    return ["colorchannelmixer=" + ":".join(
+        f"{name}={value:.8f}" for channel_names, values in zip(names, rows) for name, value in zip(channel_names, values)
+    )]
+
+
 def _camera_filters(edit, scene, width, height, fps, source_width, source_height):
     camera = edit.get("camera") or {}
     if not camera.get("enabled"):
@@ -1100,6 +1128,7 @@ def render(source, clip, edit, segments, job_id, cancel, progress, has_audio=Tru
     target = CLIP_DIR / f"{clip['id']}-{job_id}.mp4"
     crop_x, crop_y = float(edit.get("crop_x", 50)), float(edit.get("crop_y", 50))
     audio_filters = _audio_filters(edit, duration)
+    color_grade_filters = _color_grade_filters(edit)
     overlay = edit.get("title_overlay") or {}
     use_ass = bool(edit.get("subtitle_enabled", False) or overlay.get("enabled", False) and overlay.get("text", "").strip())
     subtitle = WORK_DIR / f"{job_id}.ass"
@@ -1123,6 +1152,7 @@ def render(source, clip, edit, segments, job_id, cancel, progress, has_audio=Tru
             video_frame_counts.append(frame_count)
             input_args.extend(["-ss", f"{scene['source_start']:.6f}", "-t", f"{scene_duration:.6f}", "-i", str(source)])
             camera_filters = _camera_filters(edit, scene, width, height, fps, source_width, source_height)
+            camera_filters.extend(color_grade_filters)
             graph.append(
                 f"[{index}:v:0]trim=duration={scene_duration:.6f},setpts=PTS-STARTPTS,"
                 f"{','.join(camera_filters)},tpad=stop_mode=clone:stop_duration=1,"
@@ -1232,6 +1262,7 @@ def render(source, clip, edit, segments, job_id, cancel, progress, has_audio=Tru
         else:
             output_maps.extend(["-map", "0:a?"])
         filters = _camera_filters(edit, scene, width, height, fps, source_width, source_height)
+        filters.extend(color_grade_filters)
         if camera_enabled:
             filters[:0] = [f"trim=duration={scene_duration:.6f}", "setpts=PTS-STARTPTS"]
         if use_ass:

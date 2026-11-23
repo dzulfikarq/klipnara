@@ -160,3 +160,5 @@ Before closing a UI change, review at desktop wide, 1366px, 768px, 390px, and 32
 - Editor sticky preview and horizontally scrollable timeline; no changes to editor, publishing, or rendering behavior.
 
 Browser QA is a manual step; static inspection does not establish visual correctness or contrast compliance. Existing Node built-in tests are `frontend/lib/clip-editor-state.test.mjs` and `frontend/lib/word-pop.test.mjs`; run them only when explicitly authorized.
+
+For major UI/workflow changes, review the portfolio gallery and refresh relevant `docs/screenshots/` captures and README captions when an authorized demo dataset and running app are available. Follow [Screenshot Guide](SCREENSHOT_GUIDE.md); never expose user data or fabricate a screen state.

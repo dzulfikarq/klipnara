@@ -1,12 +1,60 @@
-# Klipnara
+<div align="center">
+  <img src="frontend/public/branding/klipnara-logo.png" alt="Klipnara official logo" width="240">
+  <h1>Klipnara</h1>
+  <p><strong>AI Video Clipper &amp; Multi-Platform Publisher</strong></p>
+  <p>A local-first Windows studio for creating, editing, reviewing, and preparing vertical video content.</p>
+  <p>
+    <img alt="Next.js 16" src="https://img.shields.io/badge/Next.js-16-000000?logo=next.js">
+    <img alt="React 19" src="https://img.shields.io/badge/React-19-149eca?logo=react">
+    <img alt="TypeScript 5" src="https://img.shields.io/badge/TypeScript-5-3178c6?logo=typescript">
+    <img alt="FastAPI" src="https://img.shields.io/badge/API-FastAPI-009688?logo=fastapi">
+    <img alt="SQLite" src="https://img.shields.io/badge/Storage-SQLite-003b57?logo=sqlite">
+    <img alt="FFmpeg" src="https://img.shields.io/badge/Media-FFmpeg-007808?logo=ffmpeg">
+  </p>
+</div>
 
-**V3.2.1 multi-account publishing:** connect multiple accounts per provider, choose defaults, keep destination metadata separate, and queue/recover each destination independently. Google OAuth grants exposing multiple YouTube channels still fail closed; connect separate Google accounts with `prompt=select_account`.
+## Application Preview
 
-**Klipnara Studio is a local-first Windows video creator.** Create timestamp-based Quick Clips with single- or multi-scene editing, optional AI Smart Clips, YouTube-preview-based Quick Clips with an optional explicitly enabled local segment adapter or a local-file fallback, or AI Mood Quotes videos with original text, reused local backgrounds/music, and animated typography. Asset Library manages local video/image/music and offers user-selected official Pexels footage search/import. V2.8 adds reviewed subtitle/translation tracks, composition transcription, SRT/VTT import/export, and expanded caption controls. V2.12 adds Word Pop: one timed word at a time, manual alignment, live preview, and per-word ASS rendering. V2.9 adds Batch Creator for up to 10 outputs. V2.11 adds YouTube Publishing Studio for approved Clip and Mood outputs: metadata drafts/templates, native YouTube scheduling, upload history/calendar, and custom thumbnails through existing OAuth/resumable uploader. V3.1 adds official YouTube Analytics with separate channel/Klipnara scopes, comparisons, retention, CSV export, rule-based insights, and immutable production attribution. V3.2 adds conditional TikTok Inbox transfer and Facebook Login for Business Instagram Reels resumable publishing, independent status/recovery, and always-available manual export. V3.2.1 adds multiple connected destinations, per-account metadata/defaults, and independent jobs per selected account.
+Captured from the running local application at **1600 × 900**. Gallery shows media-free workflow states; user footage, account details, and saved project content are intentionally excluded.
 
-Klipnara keeps media, SQLite state, Whisper/Ollama processing, and YouTube OAuth tokens on the local Windows user profile. Cloud AI requires per-request consent. Highlight analysis, Mood Quotes, and translation send text; optional cloud subtitle transcription uploads composition audio only after separate explicit confirmation. Local Whisper keeps audio on-device.
+![Klipnara workflow selector showing Quick Clip, AI Smart Clip, Mood Quotes, Batch Creator, and YouTube Clip](docs/screenshots/01-workflow-selector.webp)
 
-## Quick start
+<p align="center"><strong>Workflow selector</strong> · Entry points for the main creation flows.</p>
+
+![Quick Clip setup with empty source input and timestamp controls](docs/screenshots/02-quick-clip-setup.webp)
+
+**Quick Clip** · Timestamp-based creation form; no source media loaded.
+
+![YouTube Clip setup with an empty URL field](docs/screenshots/03-youtube-clip-setup.webp)
+
+**YouTube Clip** · URL validation and preview workflow; no URL submitted.
+
+![Batch Creator form with no source selected and no batch submitted](docs/screenshots/04-batch-creator-empty.webp)
+
+<p align="center"><strong>Batch Creator</strong> · Empty draft form; source selection cleared and no batch created.</p>
+
+## Key Features
+
+- **Quick Clip and AI Smart Clip:** timestamp-based edits or optional transcript/highlight analysis with local and consent-gated cloud providers.
+- **Clip Editor:** single- and multi-scene timeline, crop, transitions, review, and export controls.
+- **Mood Quotes:** compose original text with local backgrounds/music, animated typography, and optional consent-gated generation.
+- **Subtitles:** editable/translated tracks, SRT/VTT import-export, and Word Pop with reviewed word timing.
+- **Assets and batches:** local Asset Library, optional Pexels search/import with attribution data, and serial batches of up to 10 items; users must review rights.
+- **Publishing:** approved YouTube outputs, Analytics, and conditional TikTok Inbox/Instagram Reels workflows; manual export remains available.
+
+## Tech Stack
+
+- **Frontend:** Next.js 16, React 19, TypeScript 5, custom CSS.
+- **Backend:** Python 3.10+, FastAPI, Uvicorn, and a serial local worker.
+- **Persistence:** SQLite and media/job files under the Windows user profile; OAuth tokens use Windows DPAPI protection.
+- **Media:** FFmpeg and ffprobe; optional, explicitly enabled yt-dlp segment adapter.
+- **AI and integrations:** optional Whisper.cpp/Ollama, consent-gated Gemini/OpenAI, YouTube APIs, and optional Pexels/TikTok/Meta integrations.
+
+## Architecture
+
+The Next.js UI calls a local FastAPI service. The backend owns SQLite state, local media, and serial processing/render jobs. Media stays on-device by default; cloud AI receives only data described in the relevant consent flow. See [Architecture](docs/architecture.md) for data boundaries, workers, and integration details.
+
+## Getting Started
 
 Requirements: Windows 10/11, Python 3.10+, Node.js 20.9+, FFmpeg/ffprobe. Whisper/model and Ollama/model are optional AI Smart Clip runtimes. Mood Quotes generation needs a configured Gemini or OpenAI backend key and explicit consent per request; rendering itself needs no AI runtime. YouTube OAuth is optional for approved Clip or Mood render outputs.
 
@@ -62,13 +110,19 @@ Requirements: Windows 10/11, Python 3.10+, Node.js 20.9+, FFmpeg/ffprobe. Whispe
 - Social publishing V3.2: conditional TikTok Inbox transfer (`user.info.basic` + `video.upload`; no `video.publish`/Direct Post) and Instagram Professional Reels publishing through Facebook Login for Business local resumable upload. Jobs, failures, retries, provider reconciliation, rights confirmation, and manual export stay independent. TikTok Inbox needs creator action; only provider-confirmed completion is Published. App review, eligibility, and live API access are not inferred.
 - Multi-account publishing V3.2.1: connect multiple YouTube, TikTok, and Instagram destinations; set provider defaults; save per-account metadata; enqueue independent jobs; preserve history and shared grants on disconnect. Google grants exposing multiple YouTube channels still fail closed.
 
-**Limits:** V2.6–V3.2 source changes and regression assertions are not runtime-validated in this checkout; no tests, typecheck/build, server, browser, provider, FFmpeg, OAuth, or live YouTube API action ran. Analytics requires YouTube Data API v3 and YouTube Analytics API enabled in Google Cloud plus actual `youtube.readonly` and `yt-analytics.readonly` grants; it requests no monetary scope. Channel scope is channel-wide; Klipnara scope is limited to published video IDs tied to local publication records and new publications only receive immutable production snapshots. Reports may lag, retention may be unavailable, cache lasts six hours, and rule-based comparisons require minimum samples. See Analytics manual QA and API notes before claiming verified. V2.8–V2.12 checks remain unrun. V2.10 uses stacked, non-sticky preview below 1080px; dark theme is not implemented. Cloud STT/translation costs and accuracy depend on provider; audio uploads require confirmation; OpenAI transcription supplies no timestamps; Gemini word timing is capped at 30 minutes; local Whisper stays segment-timed. Word Pop requires reviewed word times and rejects ASS intervals below 10 ms precision; manual Preview-vs-MP4 QA remains pending. Pexels checks are mocked only; no live request. Pexels imports cap at 512 MiB and one import runs at a time; legacy Mood project assets must be linked to shared Asset Library before batching. Users must review licenses and rights. Multi-Scene uses one source, per-boundary Crossfade/Dip to Black (Zoom Blur→Crossfade fallback), up to 12 scenes, 0.5-second minimum per interval, and 180-second final cap; browser seeking can lag. Live Preview-vs-MP4 transition QA remains pending. YouTube segment import requires optional external `yt-dlp`, FFmpeg/ffprobe, explicit backend opt-in, and user rights/permission; platform terms may still prohibit retrieval. No video is guaranteed importable. Mobile app, hosting, and multi-user SaaS remain unimplemented. Social API publishing is conditional; manual export remains available. Mood Quotes keeps separate project/render tables and review fingerprint. See [Design](docs/design.md) and [Roadmap](docs/roadmap.md).
+## Limitations & Testing
+
+This gallery intentionally shows media-free setup states only. Editor, Mood Quotes, Asset Library, Publishing, and Connected Accounts previews need approved demo media or test accounts; no user media or account data is published here. Some screens still display legacy UI version labels (`2.9` and `V2.11.0`); treat repository source and documentation as the version reference.
+
+This portfolio update verified local HTTP responses and inspected the running UI. It did **not** run tests, typecheck, build, FFmpeg, OAuth, provider APIs, uploads, or publishing actions. See [Testing and Troubleshooting](docs/testing-and-troubleshooting.md) for feature-level coverage and manual QA status.
+
+**Limits:** V2.6–V3.2 source changes and regression assertions are not runtime-validated in this checkout; no tests, typecheck/build, feature-workflow browser QA, provider, FFmpeg, OAuth, or live YouTube API action ran. Analytics requires YouTube Data API v3 and YouTube Analytics API enabled in Google Cloud plus actual `youtube.readonly` and `yt-analytics.readonly` grants; it requests no monetary scope. Channel scope is channel-wide; Klipnara scope is limited to published video IDs tied to local publication records and new publications only receive immutable production snapshots. Reports may lag, retention may be unavailable, cache lasts six hours, and rule-based comparisons require minimum samples. See Analytics manual QA and API notes before claiming verified. V2.8–V2.12 checks remain unrun. V2.10 uses stacked, non-sticky preview below 1080px; dark theme is not implemented. Cloud STT/translation costs and accuracy depend on provider; audio uploads require confirmation; OpenAI transcription supplies no timestamps; Gemini word timing is capped at 30 minutes; local Whisper stays segment-timed. Word Pop requires reviewed word times and rejects ASS intervals below 10 ms precision; manual Preview-vs-MP4 QA remains pending. Pexels checks are mocked only; no live request. Pexels imports cap at 512 MiB and one import runs at a time; legacy Mood project assets must be linked to shared Asset Library before batching. Users must review licenses and rights. Multi-Scene uses one source, per-boundary Crossfade/Dip to Black (Zoom Blur→Crossfade fallback), up to 12 scenes, 0.5-second minimum per interval, and 180-second final cap; browser seeking can lag. Live Preview-vs-MP4 transition QA remains pending. YouTube segment import requires optional external `yt-dlp`, FFmpeg/ffprobe, explicit backend opt-in, and user rights/permission; platform terms may still prohibit retrieval. No video is guaranteed importable. Mobile app, hosting, and multi-user SaaS remain unimplemented. Social API publishing is conditional; manual export remains available. Mood Quotes keeps separate project/render tables and review fingerprint. See [Design](docs/design.md) and [Roadmap](docs/roadmap.md).
 
 `YOUTUBE_DATA_API_KEY` is optional and backend-only for YouTube Clip metadata; IFrame preview needs no key. Publishing tests mock Google HTTP requests. No live OAuth, upload, schedule, or thumbnail has been verified; no real video ID has been verified. Start OAuth setup from **Akun → Lihat Panduan Setup**; documentation: [Getting Started](docs/getting-started.md), [YouTube Shorts Publishing](docs/youtube-shorts-publishing.md), and [Design](docs/design.md).
 
 V3.2.1 mocked coverage and manual account-switch/destination/disconnect checks remain unrun. Google grants exposing multiple YouTube channels still fail closed; connect separate Google accounts with `prompt=select_account`.
 
-## Documentation index
+## Documentation
 
 | Document | Contents |
 |---|---|
@@ -83,8 +137,9 @@ V3.2.1 mocked coverage and manual account-switch/destination/disconnect checks r
 | [Testing and Troubleshooting](docs/testing-and-troubleshooting.md) | Automated checks, recorded/live test boundaries and diagnostics |
 | [YouTube Shorts Publishing](docs/youtube-shorts-publishing.md) | Google Cloud/OAuth setup, resumable upload and reconciliation |
 | [Roadmap](docs/roadmap.md) | Product direction and planned-vs-implemented boundary |
+| [Screenshot Guide](docs/SCREENSHOT_GUIDE.md) | Safe capture, viewport, naming, privacy, and refresh workflow |
 
-## Checks
+## Verification & Checks
 
 From `backend` after `pip install -r requirements-dev.txt`:
 
